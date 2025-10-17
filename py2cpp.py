@@ -10,7 +10,7 @@ from typing import TypeVar, ParamSpec, Callable
 from functools import wraps
 
 
-from utils.util_string import *
+from utils.util_string import pad, unwrap_paren
 from utils.util_type import parse_types, parse_func_type
 
 
@@ -76,7 +76,7 @@ Algorithm = Builtins("#include <algorithm>", inline=True)
 Str_Upper = Builtins("str/upper.cpp", requires=[String, Algorithm, CCtype])
 Str_Lower = Builtins("str/lower.cpp", requires=[String, Algorithm, CCtype])
 CStdLib = Builtins("#include <cstdlib>", inline=True)
-
+Tuple = Builtins("#include <tuple>\nusing std::tuple;", inline=True)
 
 @dataclass
 class State:
@@ -195,15 +195,35 @@ type_alias = {
 def parse_type(type_: str, state: State) -> str:
     def __parse_type(type_: str) -> str:
         return parse_type(type_, state)
+    
     if type_ == "builtins.str":
         state.used_builtins.add(String)
         return "string"
+    
     if type_ in type_alias:
         return type_alias[type_]
     
     if type_.startswith("builtins.list"):
         state.used_builtins.add(List)
         return "vector<" + __parse_type(type_[len("builtins.list")+1:-1]) + ">"
+    
+    if type_.startswith("tuple"):
+        state.used_builtins.add(Tuple)
+        elem_types: list[str] = []
+        inner = type_[len("tuple")+1:-1]
+        depth = 0
+        last_idx = 0
+        for i, c in enumerate(inner):
+            if c == "," and depth == 0:
+                elem_types.append(inner[last_idx:i].strip())
+                last_idx = i + 1
+            elif c == "[":
+                depth += 1
+            elif c == "]":
+                depth -= 1
+        elem_types.append(inner[last_idx:].strip())
+        return "tuple<" + ", ".join(__parse_type(t) for t in elem_types) + ">"
+    
     raise ValueError(f"Unknown type: {type_}")
 
 def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, path: str = "") -> str:
@@ -214,17 +234,20 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
     match type(node):
         case ast.Constant:
             assert type(node) == ast.Constant
-            
             if type(node.value) == bool:
                 return "true" if node.value else "false"
             return state.origin_code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
+        
         case ast.List:
             assert type(node) == ast.List
-            
-            return "{" + ", ".join(__dfs_stmt(elt) for elt in node.elts) + "}"
+            return "{" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + "}"
+        
+        case ast.Tuple:
+            assert type(node) == ast.Tuple
+            return "std::make_tuple(" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + ")"
+        
         case ast.Call:
             assert type(node) == ast.Call
-            
             func = node.func
             if type(func) == ast.Name:
                 if func.id == "cast":
@@ -258,8 +281,10 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                     state.used_builtins.add(CStdLib)
                     return "std::exit(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
                 return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
+
             if type(func) == ast.Attribute:
                 target_type = eval_type(func.value, type_dict, state, path)
+
                 if target_type == "builtins.str":
                     match func.attr:
                         case "index":
@@ -276,6 +301,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                             return "py2c::str::lower(" + __dfs_stmt(func.value) + ")"
                         case _:
                             raise NotImplementedError(f"Unsupported string method: {func.attr}")
+
                 if target_type.startswith("builtins.list"):
                     match func.attr:
                         case "append":
@@ -305,10 +331,11 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                         case _:
                             raise NotImplementedError(f"Unsupported list method: {func.attr}")
                 return __dfs_stmt(func.value) + "." + func.attr + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
+
         case ast.Name:
             assert type(node) == ast.Name
-            
             return node.id
+
         case ast.BinOp:
             assert type(node) == ast.BinOp
             
@@ -322,17 +349,18 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 ast.RShift: ">>",
                 ast.BitOr: "|",
                 ast.BitAnd: "&",
-                ast.BitXor: "^",
-                
+                ast.BitXor: "^"
             }
             return "(" + __dfs_stmt(node.left) + " " + ops[type(node.op)] + " " + __dfs_stmt(node.right) + ")"
+
         case ast.Subscript:
             assert type(node) == ast.Subscript
-
+            if eval_type(node.value, type_dict, state, path).startswith("tuple"):
+                return "std::get<" + unwrap_paren(__dfs_stmt(node.slice)) + ">(" + __dfs_stmt(node.value) + ")"
             return __dfs_stmt(node.value) + "[" + unwrap_paren(__dfs_stmt(node.slice)) + "]"
+
         case ast.UnaryOp:
             assert type(node) == ast.UnaryOp
-            
             unary_ops: dict[type[ast.unaryop], str] = {
                 ast.UAdd: "+",
                 ast.USub: "-",
@@ -340,9 +368,9 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 ast.Invert: "~",
             }
             return unary_ops[type(node.op)] + __dfs_stmt(node.operand)
+
         case ast.Compare:
             assert type(node) == ast.Compare
-            
             assert len(node.ops) == 1 and len(node.comparators) == 1
             comp_ops: dict[type[ast.cmpop], str] = {
                 ast.Eq: "==",
@@ -353,8 +381,10 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 ast.GtE: ">=",
             }
             return "(" + __dfs_stmt(node.left) + " " + comp_ops[type(node.ops[0])] + " " + __dfs_stmt(node.comparators[0]) + ")"
+
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
+
     raise RuntimeError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
 def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, path: str = "") -> str:
@@ -563,7 +593,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
         case ast.FunctionDef:
             assert type(node) == ast.FunctionDef
             loc = path + node.name
-            fn_type = type_dict[loc] # ex) def (a: builtins.int, b: builtins.int) -> builtins.int
+            fn_type = type_dict[loc]
             _match = re.fullmatch(r"def \((.*)\) -> (.*)", fn_type)
             if _match:
                 ret_type = _match.group(2)
@@ -634,7 +664,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 def py_2_cpp(text: str, path: str = "<string>", verbose: bool = False) -> str:
 
     _parse_types = get_time(parse_types) if verbose else parse_types
-    type_dict = _parse_types(text)
+    type_dict = _parse_types(text, str(path_here))
 
     tree = ast.parse(text, filename=path)
     

@@ -130,7 +130,7 @@ def parse_func_type(type_str: str) -> tuple[list[tuple[str, str]], str]:
         return args, ret_type
     raise ValueError("Invalid function type")
 
-def parse_types(text: str) -> dict[str, str]:
+def parse_types(text: str, path_scripts: str) -> dict[str, str]:
 
     tree = ast.parse(text)
 
@@ -149,9 +149,8 @@ def parse_types(text: str) -> dict[str, str]:
         f.write(new_code)
         tmp_path = f.name
 
-    # mypy 실행
     import os
-    os.environ["MYPYPATH"] = "C:\\Users\\USER\\Desktop\\py2c\\"
+    os.environ["MYPYPATH"] = path_scripts
     result = api.run([tmp_path, "--strict", "--show-error-codes", "--no-error-summary"])
 
 

@@ -1,4 +1,8 @@
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, TypeVar
+
+T = TypeVar("T")
+def c_struct(cls: T) -> T:
+    return cls
 
 class c_int(Protocol):
     def __int__(self) -> int: ...
