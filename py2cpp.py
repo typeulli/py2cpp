@@ -68,15 +68,30 @@ class Builtins:
     def __hash__(self):
         return hash(self.idx)
 
-String = Builtins("#include <string>\nusing std::string;", inline=True)
-List = Builtins("#include <vector>\nusing std::vector;", inline=True)
+String = Builtins("#include <string>", inline=True)
+List = Builtins("#include <vector>", inline=True)
 Str_Find = Builtins("str/find.cpp", requires=[String])
 CCtype = Builtins("#include <cctype>", inline=True)
 Algorithm = Builtins("#include <algorithm>", inline=True)
 Str_Upper = Builtins("str/upper.cpp", requires=[String, Algorithm, CCtype])
 Str_Lower = Builtins("str/lower.cpp", requires=[String, Algorithm, CCtype])
 CStdLib = Builtins("#include <cstdlib>", inline=True)
-Tuple = Builtins("#include <tuple>\nusing std::tuple;", inline=True)
+Tuple = Builtins("#include <tuple>", inline=True)
+
+NameDict: dict[str, str] = {
+    "string": "std::string",
+    "vector": "std::vector",
+    "tuple": "std::tuple",
+    "cin": "std::cin",
+    "cout": "std::cout",
+    "endl": "std::endl",
+    "getline": "std::getline",
+    "get": "std::get",
+}
+
+@dataclass
+class Setting:
+    minimize_namespace: list[str]
 
 @dataclass
 class State:
@@ -84,6 +99,7 @@ class State:
     defined: dict[str, bool] = field(default_factory=lambda: dict[str, bool]())
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
     used_tempids: set[str] = field(default_factory=lambda: set[str]())
+    setting: Setting = field(default_factory=lambda: Setting(minimize_namespace=[]))
     def get_tempid(self) -> str:
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
         while True:
@@ -91,6 +107,11 @@ class State:
             if id_[0] not in "0123456789" and id_ not in self.used_tempids:
                 self.used_tempids.add(id_)
                 return id_
+
+    def get_name(self, base: str) -> str:
+        if base in self.setting.minimize_namespace:
+            return base
+        return NameDict[base]
 
 @dataclass
 class StmtState:
@@ -108,6 +129,7 @@ class ScriptTemplate:
     result_expr: str
     require_tmps: list[str] = field(default_factory=lambda: [])
     require_vars: list[str] = field(default_factory=lambda: [])
+    require_names: list[str] = field(default_factory=lambda: [])
 
     def __post_init__(self):
         self.code = self.code.lstrip("\n").rstrip("\n")
@@ -115,12 +137,15 @@ class ScriptTemplate:
     def format(self, stmt_state: StmtState, **kwargs: str) -> str:
         state = stmt_state.state
         __get_tempid = lambda: state.get_tempid()
+        
         tmp_vars = {tmp: __get_tempid() for tmp in self.require_tmps}
         for var in self.require_vars:
             assert var in kwargs, f"Missing variable '{var}' for template"
     
-        stmt_state.extra_codes.append(self.code.format(**tmp_vars, **kwargs))
-        return self.result_expr.format(**tmp_vars, **kwargs)
+        names = {"__"+name: state.get_name(name) for name in self.require_names}
+
+        stmt_state.extra_codes.append(self.code.format(**tmp_vars, **kwargs, **names))
+        return self.result_expr.format(**tmp_vars, **kwargs, **names)
 
 Template_Pop_NoIndex = ScriptTemplate(
     code="""
@@ -146,21 +171,23 @@ auto {tmp2} = {tmp1}[{index}];
 
 Template_Input_NoPrompt = ScriptTemplate(
     code="""
-std::string {tmp1};
-std::getline(std::cin, {tmp1});
+{__string} {tmp1};
+{__getline}({__cin}, {tmp1});
 """,
     result_expr="{tmp1}",
-    require_tmps=["tmp1"]
+    require_tmps=["tmp1"],
+    require_names=["cin", "string", "getline"]
 )
 
 Template_Input_WithPrompt = ScriptTemplate(
     code="""
-std::cout << {prompt};
-std::string {tmp1};
-std::getline(std::cin, {tmp1});
+{__cout} << {prompt};
+{__string} {tmp1};
+{__getline}({__cin}, {tmp1});
 """,
     result_expr="{tmp1}",
-    require_vars=["prompt"], require_tmps=["tmp1"]
+    require_vars=["prompt"], require_tmps=["tmp1"],
+    require_names=["cout", "cin", "string", "getline"]
 )
 
 def eval_type(expr: ast.expr, type_dict: dict[str, str], state: State, path: str = "") -> str:
@@ -198,14 +225,14 @@ def parse_type(type_: str, state: State) -> str:
     
     if type_ == "builtins.str":
         state.used_builtins.add(String)
-        return "string"
+        return state.get_name("string")
     
     if type_ in type_alias:
         return type_alias[type_]
     
     if type_.startswith("builtins.list"):
         state.used_builtins.add(List)
-        return "vector<" + __parse_type(type_[len("builtins.list")+1:-1]) + ">"
+        return state.get_name("vector") + "<" + __parse_type(type_[len("builtins.list")+1:-1]) + ">"
     
     if type_.startswith("tuple"):
         state.used_builtins.add(Tuple)
@@ -222,7 +249,7 @@ def parse_type(type_: str, state: State) -> str:
             elif c == "]":
                 depth -= 1
         elem_types.append(inner[last_idx:].strip())
-        return "tuple<" + ", ".join(__parse_type(t) for t in elem_types) + ">"
+        return state.get_name("tuple") + "<" + ", ".join(__parse_type(t) for t in elem_types) + ">"
     
     raise ValueError(f"Unknown type: {type_}")
 
@@ -260,7 +287,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 if func.id == "print":
                     keywords = node.keywords
                     
-                    kw_end = "std::endl"
+                    kw_end = state.get_name("endl")
                     kw_sep = "\" \""
 
                     for kwd in keywords:
@@ -268,7 +295,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                             kw_end = __dfs_stmt(kwd.value)
                         if kwd.arg == "sep":
                             kw_sep = __dfs_stmt(kwd.value)
-                    return "std::cout << " + (" << " + kw_sep + " << ").join(__dfs_stmt(arg) for arg in node.args) + " << " + kw_end
+                    return state.get_name("cout") + " << " + (" << " + kw_sep + " << ").join(__dfs_stmt(arg) for arg in node.args) + " << " + kw_end
                 if func.id == "input":
                     if len(node.args) == 0:
                         return Template_Input_NoPrompt.format(stmt_state)
@@ -356,7 +383,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
         case ast.Subscript:
             assert type(node) == ast.Subscript
             if eval_type(node.value, type_dict, state, path).startswith("tuple"):
-                return "std::get<" + unwrap_paren(__dfs_stmt(node.slice)) + ">(" + __dfs_stmt(node.value) + ")"
+                return state.get_name("get") + "<" + unwrap_paren(__dfs_stmt(node.slice)) + ">(" + __dfs_stmt(node.value) + ")"
             return __dfs_stmt(node.value) + "[" + unwrap_paren(__dfs_stmt(node.slice)) + "]"
 
         case ast.UnaryOp:
@@ -381,6 +408,27 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 ast.GtE: ">=",
             }
             return "(" + __dfs_stmt(node.left) + " " + comp_ops[type(node.ops[0])] + " " + __dfs_stmt(node.comparators[0]) + ")"
+
+        case ast.BoolOp:
+            assert type(node) == ast.BoolOp
+            bool_ops: dict[type[ast.boolop], str] = {
+                ast.And: "&&",
+                ast.Or: "||",
+            }
+            return "(" + (" " + bool_ops[type(node.op)] + " ").join(unwrap_paren(__dfs_stmt(value)) for value in node.values) + ")"
+
+        case ast.IfExp:
+            assert type(node) == ast.IfExp
+            body_str = __dfs_stmt(node.body)
+            if "?" in body_str:
+                body_str = "(" + body_str + ")"
+            test_str = __dfs_stmt(node.test)
+            if ":" in test_str:
+                test_str = "(" + test_str + ")"
+            orelse_str = __dfs_stmt(node.orelse)
+            if ":" in orelse_str:
+                orelse_str = "(" + orelse_str + ")"
+            return test_str + " ? " + body_str + " : " + orelse_str
 
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
@@ -661,14 +709,14 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 
 
 
-def py_2_cpp(text: str, path: str = "<string>", verbose: bool = False) -> str:
+def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> str:
 
     _parse_types = get_time(parse_types) if verbose else parse_types
     type_dict = _parse_types(text, str(path_here))
 
     tree = ast.parse(text, filename=path)
     
-    state = State(origin_code=text)
+    state = State(origin_code=text, setting=setting or Setting(minimize_namespace=[]))
     code = "#include <iostream>\n"
     _dfs = get_time(dfs) if verbose else dfs
     code_body = _dfs(tree, type_dict, state=state)
@@ -676,6 +724,11 @@ def py_2_cpp(text: str, path: str = "<string>", verbose: bool = False) -> str:
     include_set: set[str] = set()
     for b in state.used_builtins:
         code += b.toString(include_set)
+        
+    code += "\n"
+
+    for name in state.setting.minimize_namespace:
+        code += "using " + NameDict[name] + ";\n"
 
     code += "\n" + code_body
     
@@ -695,11 +748,11 @@ def build_cpp_to_exe(cpp_code: str, output_path: str):
         raise RuntimeError(f"Compilation failed: {result.stderr}")
     return
 
-def py_2_exe(text: str, path: str, verbose: bool = False):
+def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: bool = False):
     path_target = Path(path)
 
-    code = py_2_cpp(text, path=path, verbose=verbose)
-    
+    code = py_2_cpp(text, path=path, verbose=verbose, setting=setting)
+
     path_temp = path_here / "temp"
     path_temp.mkdir(exist_ok=True)
 
@@ -719,4 +772,4 @@ def py_2_exe(text: str, path: str, verbose: bool = False):
 
 if __name__ == "__main__":
     path_target = path_here / "test" / "main.py"
-    d = py_2_exe(path_target.read_text(), path=str(path_target), verbose=True)
+    d = py_2_exe(path_target.read_text(), path=str(path_target), verbose=True, setting=Setting(minimize_namespace=["cout", "cin", "endl", "get", "string"]))
