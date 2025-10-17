@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Python to C++ Converter</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Arial, sans-serif; 
+            margin: 0; 
+            padding: 40px;
+            background-color: #f0f8ff;
+            color: #2c3e50;
+        }
+        h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1.5rem;
+            color: #1e88e5;
+            text-align: center;
+        }
+        h3 {
+            font-size: 1.5rem;
+            color: #0277bd;
+            margin-bottom: 0.8rem;
+        }
+        #container { 
+            display: flex; 
+            gap: 30px; 
+            margin-top: 30px;
+        }
+        .editor { 
+            width: 45vw; 
+            height: 60vh; 
+            border: none;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        #controls { 
+            margin-top: 30px; 
+            text-align: center;
+        }
+        button {
+            background-color: #2196f3;
+            color: white;
+            border: none;
+            padding: 12px 28px;
+            font-size: 1.1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+        button:hover {
+            background-color: #0d8aee;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+</head>
+<body>
+    <h2>Python to C++ Converter</h2>
+    <div id="container">
+        <div>
+            <h3>Python</h3>
+            <div id="py-editor" class="editor"></div>
+        </div>
+        <div>
+            <h3>C++</h3>
+            <div id="cpp-editor" class="editor"></div>
+        </div>
+    </div>
+    <div id="controls">
+        <button onclick="convertCode()">Convert</button>
+    </div>
+    <script>
+            const DEFAULT_PYTHON_CODE = `def get_fibonacci(n: int) -> int:
+    l = [0, 1]
+    for i in range(2, n):
+        l.append(l[i - 1] + l[i - 2])
+    return l.pop(n - 1)
+
+def run() -> None:
+    while True:
+        s = input("input fibonacci index: ")
+        if s == "exit":
+            return
+        print(get_fibonacci(int(s)))
+
+run()`;
+            const DEFAULT_CPP_CODE = `#include <iostream>
+#include <string>
+using std::string;
+#include <vector>
+using std::vector;
+
+long get_fibonacci(long n) {
+    vector<long> l = {0, 1};
+    for (long i = 2; i < n; i += 1) {
+        l.push_back(l[i - 1] + l[i - 2]);
+    }
+    returnauto xiWYvYp3 = l;
+    auto yf0Hw7x6 = xiWYvYp3[(n - 1)];
+    xiWYvYp3.erase(xiWYvYp3.begin() + (n - 1));
+    return yf0Hw7x6;
+}
+
+void run() {
+    while (true) {
+        std::cout << "input fibonacci index: ";
+        std::string d5KcLGYs;
+        std::getline(std::cin, d5KcLGYs);
+        string s = d5KcLGYs;
+        if (s == "exit") {
+            returnreturn;
+        }
+        std::cout << get_fibonacci(std::stol(s)) << std::endl;
+    }
+}
+
+int main() {
+    run();
+    return 0;
+}`
+
+
+        var pyEditor, cppEditor;
+        require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+        require(['vs/editor/editor.main'], function() {
+            pyEditor = monaco.editor.create(document.getElementById('py-editor'), {
+                value: DEFAULT_PYTHON_CODE,
+                language: 'python',
+                theme: 'vs-dark'
+            });
+            cppEditor = monaco.editor.create(document.getElementById('cpp-editor'), {
+                value: DEFAULT_CPP_CODE,
+                language: 'cpp',
+                theme: 'vs-dark',
+                readOnly: true
+            });
+        });
+
+        function convertCode() {
+            fetch('/py2cpp/convert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: pyEditor.getValue() })
+            })
+            .then(response => response.json())
+            .then(data => {
+                cppEditor.setValue(data.cpp_code || '// Conversion failed' + (data.error ? `\n// Error: ${data.error}` : ''));
+            })
+            .catch(error => {
+                if (error.message === 'Failed to fetch') {
+                    cppEditor.setValue('// Connection error: Is the server running?');
+                    return;
+                }
+                cppEditor.setValue('// Error during conversion');
+            });
+        }
+
+    </script>
+</body>
+</html>
