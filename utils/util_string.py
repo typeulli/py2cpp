@@ -4,7 +4,22 @@ def pad(text: str, n: int = 1) -> str:
 
 def unwrap_paren(s: str) -> str:
     s = s.strip()
-    while s.startswith("(") and s.endswith(")"):
+    while True:
+        if not (s.startswith("(") and s.endswith(")")):
+            break
+        depth = 0
+        is_str = False
+        for i, c in enumerate(s):
+            if c == '"' or c == "'":
+                is_str = not is_str
+            if is_str:
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            if depth == 0 and i != len(s) - 1:
+                return s
         s = s[1:-1].strip()
     return s
 

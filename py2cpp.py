@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import ast
 import random
-import re
 import shutil
 import time
 import tempfile
@@ -11,7 +10,8 @@ from functools import wraps
 
 
 from utils.util_string import pad, unwrap_paren
-from utils.util_type import parse_types, parse_func_type
+from utils.util_type import FunctionTypeData, TypeContext, TypeData, parse_types
+from utils.util_code import assert_type
 
 
 P = ParamSpec("P")
@@ -68,6 +68,7 @@ class Builtins:
     def __hash__(self):
         return hash(self.idx)
 
+IOStream = Builtins("#include <iostream>", inline=True)
 String = Builtins("#include <string>", inline=True)
 List = Builtins("#include <vector>", inline=True)
 Str_Find = Builtins("str/find.cpp", requires=[String])
@@ -78,15 +79,15 @@ Str_Lower = Builtins("str/lower.cpp", requires=[String, Algorithm, CCtype])
 CStdLib = Builtins("#include <cstdlib>", inline=True)
 Tuple = Builtins("#include <tuple>", inline=True)
 
-NameDict: dict[str, str] = {
-    "string": "std::string",
-    "vector": "std::vector",
-    "tuple": "std::tuple",
-    "cin": "std::cin",
-    "cout": "std::cout",
-    "endl": "std::endl",
-    "getline": "std::getline",
-    "get": "std::get",
+NameDict: dict[str, tuple[Builtins, str]] = {
+    "string": (String, "std::string"),
+    "vector": (List, "std::vector"),
+    "tuple": (Tuple, "std::tuple"),
+    "cin": (IOStream, "std::cin"),
+    "cout": (IOStream, "std::cout"),
+    "endl": (IOStream, "std::endl"),
+    "getline": (IOStream, "std::getline"),
+    "get": (Tuple, "std::get"),
 }
 
 @dataclass
@@ -109,9 +110,11 @@ class State:
                 return id_
 
     def get_name(self, base: str) -> str:
+        builtin, name = NameDict[base]
+        self.used_builtins.add(builtin)
         if base in self.setting.minimize_namespace:
             return base
-        return NameDict[base]
+        return name
 
 @dataclass
 class StmtState:
@@ -167,8 +170,6 @@ auto {tmp2} = {tmp1}[{index}];
     require_tmps=["tmp1", "tmp2"], require_vars=["list", "index"]
 )
 
-
-
 Template_Input_NoPrompt = ScriptTemplate(
     code="""
 {__string} {tmp1};
@@ -190,73 +191,71 @@ Template_Input_WithPrompt = ScriptTemplate(
     require_names=["cout", "cin", "string", "getline"]
 )
 
-def eval_type(expr: ast.expr, type_dict: dict[str, str], state: State, path: str = "") -> str:
+def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "") -> TypeData:
     if isinstance(expr, ast.Name):
-        type_ = type_dict[path + expr.id]
+        type_ = type_ctx.type_dict[path + expr.id]
         assert type_ != "Any"
         return type_
     if isinstance(expr, ast.Call):
-        _, ret_type = parse_func_type(eval_type(expr.func, type_dict, state, path))
-        return ret_type
-    
-    
+        func = eval_type(expr.func, type_ctx, state, path)
+        assert type(func) == FunctionTypeData
+        return func.return_type
+
     raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
 
 type_alias = {
-    "py2c_header.c_int": "int",
-    "py2c_header.c_uint": "unsigned int",
-    "py2c_header.c_short": "short",
-    "py2c_header.c_ushort": "unsigned short",
-    "py2c_header.c_long": "long",
-    "py2c_header.c_ulong": "unsigned long",
-    "py2c_header.c_longlong": "long long",
-    "py2c_header.c_ulonglong": "unsigned long long",
-    "py2c_header.c_float": "float",
-    "py2c_header.c_double": "double",
-    "py2c_header.c_char": "char",
-    "py2c_header.c_bool": "bool",
+    "py2cpp_header.c_int": "int",
+    "py2cpp_header.c_uint": "unsigned int",
+    "py2cpp_header.c_short": "short",
+    "py2cpp_header.c_ushort": "unsigned short",
+    "py2cpp_header.c_long": "long",
+    "py2cpp_header.c_ulong": "unsigned long",
+    "py2cpp_header.c_longlong": "long long",
+    "py2cpp_header.c_ulonglong": "unsigned long long",
+    "py2cpp_header.c_float": "float",
+    "py2cpp_header.c_double": "double",
+    "py2cpp_header.c_char": "char",
+    "py2cpp_header.c_bool": "bool",
+    "py2cpp_header.c_void": "void",
     "builtins.int": "long",
     "builtins.float": "double",
     "builtins.bool": "bool",
 }
-def parse_type(type_: str, state: State) -> str:
-    def __parse_type(type_: str) -> str:
-        return parse_type(type_, state)
-    
-    if type_ == "builtins.str":
-        state.used_builtins.add(String)
-        return state.get_name("string")
-    
-    if type_ in type_alias:
-        return type_alias[type_]
-    
-    if type_.startswith("builtins.list"):
-        state.used_builtins.add(List)
-        return state.get_name("vector") + "<" + __parse_type(type_[len("builtins.list")+1:-1]) + ">"
-    
-    if type_.startswith("tuple"):
-        state.used_builtins.add(Tuple)
-        elem_types: list[str] = []
-        inner = type_[len("tuple")+1:-1]
-        depth = 0
-        last_idx = 0
-        for i, c in enumerate(inner):
-            if c == "," and depth == 0:
-                elem_types.append(inner[last_idx:i].strip())
-                last_idx = i + 1
-            elif c == "[":
-                depth += 1
-            elif c == "]":
-                depth -= 1
-        elem_types.append(inner[last_idx:].strip())
-        return state.get_name("tuple") + "<" + ", ".join(__parse_type(t) for t in elem_types) + ">"
-    
-    raise ValueError(f"Unknown type: {type_}")
+def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
+    def __parse_type(data: TypeData) -> str:
+        return parse_type(data, type_ctx, state)
 
-def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, path: str = "") -> str:
+    if data.type_ == "builtins.str":
+        return state.get_name("string")
+
+    if data.type_ in type_alias:
+        return type_alias[data.type_]
+
+    if data.type_.startswith("builtins.list"):
+        vector_type = data.generics[0]
+        assert type(vector_type) == TypeData
+        return state.get_name("vector") + "<" + __parse_type(vector_type) + ">"
+
+    if data.type_.startswith("tuple"):
+        return state.get_name("tuple") + "<" + ", ".join(__parse_type(assert_type(t, TypeData)) for t in data.generics) + ">"
+
+    if data.type_ in type_ctx.struct_dict:
+        return type_ctx.struct_dict[data.type_].name
+    
+    dot_index = data.type_.find(".")
+    if dot_index != -1:
+        if dot_index > data.type_.find("["):
+            return __parse_type(TypeData(type_=data.type_[dot_index+1:], generics=data.generics))
+    
+
+    raise ValueError(f"Unknown type: {data.type_}")
+
+def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: str = "") -> str:
+    
     state = stmt_state.state
+    
     def __dfs_stmt(node: ast.AST) -> str:
-        return dfs_stmt(node, type_dict, stmt_state, path)
+        return dfs_stmt(node, type_ctx, stmt_state, path)
 
     match type(node):
         case ast.Constant:
@@ -264,6 +263,10 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
             if type(node.value) == bool:
                 return "true" if node.value else "false"
             return state.origin_code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
+        
+        case ast.Attribute:
+            assert type(node) == ast.Attribute
+            return __dfs_stmt(node.value) + "." + node.attr
         
         case ast.List:
             assert type(node) == ast.List
@@ -282,8 +285,8 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                     type_str = node.args[0]
                     val = node.args[1]
                     assert type(type_str) == ast.Constant and type(type_str.value) == str
-                    parsed_type = parse_type(type_str.value, state)
-                    return f"({parsed_type})({unwrap_paren(__dfs_stmt(val))})"
+                    parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
+                    return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
                 if func.id == "print":
                     keywords = node.keywords
                     
@@ -310,9 +313,9 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                 return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
 
             if type(func) == ast.Attribute:
-                target_type = eval_type(func.value, type_dict, state, path)
+                target_type = eval_type(func.value, type_ctx, state, path)
 
-                if target_type == "builtins.str":
+                if target_type.type_ == "builtins.str":
                     match func.attr:
                         case "index":
                             state.used_builtins.add(Algorithm)
@@ -329,7 +332,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
                         case _:
                             raise NotImplementedError(f"Unsupported string method: {func.attr}")
 
-                if target_type.startswith("builtins.list"):
+                if target_type.type_ == "builtins.list":
                     match func.attr:
                         case "append":
                             return __dfs_stmt(func.value) + ".push_back(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
@@ -382,7 +385,7 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
 
         case ast.Subscript:
             assert type(node) == ast.Subscript
-            if eval_type(node.value, type_dict, state, path).startswith("tuple"):
+            if eval_type(node.value, type_ctx, state, path).type_ == "tuple":
                 return state.get_name("get") + "<" + unwrap_paren(__dfs_stmt(node.slice)) + ">(" + __dfs_stmt(node.value) + ")"
             return __dfs_stmt(node.value) + "[" + unwrap_paren(__dfs_stmt(node.slice)) + "]"
 
@@ -435,16 +438,16 @@ def dfs_stmt(node: ast.AST, type_dict: dict[str, str], stmt_state: StmtState, pa
 
     raise RuntimeError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
-def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, path: str = "") -> str:
-
+def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
+    
     def __dfs(node: ast.AST) -> str:
-        return dfs(node, type_dict, state, depth + 1, path)
+        return dfs(node, type_ctx, state, depth + 1, path)
     def __dfs_stmt(node: ast.AST) -> tuple[str, str]:
         stmt_state = StmtState(state)
-        _val = dfs_stmt(node, type_dict, stmt_state, path)
+        _val = dfs_stmt(node, type_ctx, stmt_state, path)
         return _val, stmt_state.collect_extra_codes
-    def __parse_type(type_: str) -> str:
-        return parse_type(type_, state)
+    def __parse_type(type_: TypeData) -> str:
+        return parse_type(type_, type_ctx, state)
     
     
     result: str = ""
@@ -476,20 +479,37 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
             
             if len(node.targets) == 1:
                 target = node.targets[0]
-                assert type(target) == ast.Name, "Only simple variable assignment is supported"
-                target_id = target.id
+                target_attr_path: list[str] = []
+                while True:
+                    match type(target):
+                        case ast.Attribute:
+                            assert type(target) == ast.Attribute
+                            
+                            target_attr_path.insert(0, target.attr)
+                            target_new = target.value
+                            assert type(target_new) == ast.Name or type(target_new) == ast.Attribute, "Only simple variable assignment is supported" + str(ast.dump(target))
+                            target = target_new
+                            continue
+                        case ast.Name:
+                            target_attr_path.insert(0, assert_type(target, ast.Name).id)
+                            break
+                        case _:
+                            raise NotImplementedError("Only simple variable assignment is supported" + str(ast.dump(target)))
+                    break
                 
-                loc = path + target_id
-                if loc in state.defined:
+                target_str = ".".join(target_attr_path)
+                
+                loc = path + target_str
+                if len(target_attr_path) != 1 or loc in state.defined:
                     val, extra = __dfs_stmt(node.value)
                     if extra != "": result += extra + "\n"
 
-                    result += target_id + " = " + val + ";"
+                    result += target_str + " = " + unwrap_paren(val) + ";"
                 else:
                     val, extra = __dfs_stmt(node.value)
                     if extra != "": result += extra + "\n"
 
-                    result += __parse_type(type_dict[loc]) + " " + target_id + " = " + val + ";"
+                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target_str + " = " + unwrap_paren(val) + ";"
                     state.defined[loc] = True
                     
             else:
@@ -500,7 +520,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 
                     loc = path + target_id
                     if loc not in state.defined:
-                        result += __parse_type(type_dict[loc]) + " " + target_id + ";"
+                        result += __parse_type(type_ctx.get_vartype(loc)) + " " + target_id + ";"
                         state.defined[loc] = True
 
         case ast.AnnAssign:
@@ -520,7 +540,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
                 else:
                     val, extra = __dfs_stmt(value)
                     if extra != "": result += extra + "\n"
-                    result += __parse_type(type_dict[loc]) + " " + target.id + " = " + val + ";"
+                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target.id + " = " + val + ";"
                     state.defined[loc] = True
         
         case ast.AugAssign:
@@ -550,7 +570,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
                 if loc in state.defined:
                     result += target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
                 else:
-                    result += __parse_type(type_dict[loc]) + " " + target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
+                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
                     state.defined[loc] = True
 
         case ast.Expr:
@@ -566,15 +586,15 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 
             result += "if (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
-                result += pad(dfs(stmt, type_dict, state, depth + 1, path)) + "\n"
+                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
             if len(node.orelse) > 0:
                 if len(node.orelse) == 1 and type(node.orelse[0]) == ast.If:
-                    result += " else " + dfs(node.orelse[0], type_dict, state, depth, path).strip()
+                    result += " else " + dfs(node.orelse[0], type_ctx, state, depth, path).strip()
                 else:
                     result += " else {\n"
                     for stmt in node.orelse:
-                        result += pad(dfs(stmt, type_dict, state, depth + 1, path)) + "\n"
+                        result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
                     result += "}"
         case ast.For:
             assert type(node) == ast.For
@@ -624,7 +644,7 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
             else:
                 raise NotImplementedError("Only simple variable as for loop target is supported")
             for stmt in body:
-                result += pad(dfs(stmt, type_dict, state, depth + 1, path)) + "\n"
+                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
 
         case ast.While:
@@ -635,76 +655,70 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 
             result += "while (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
-                result += pad(dfs(stmt, type_dict, state, depth + 1, path)) + "\n"
+                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
 
         case ast.FunctionDef:
             assert type(node) == ast.FunctionDef
             loc = path + node.name
-            fn_type = type_dict[loc]
-            _match = re.fullmatch(r"def \((.*)\) -> (.*)", fn_type)
-            if _match:
-                ret_type = _match.group(2)
-                result += __parse_type(ret_type) + " " + node.name + "("
-                args = _match.group(1).split(", ")
-                if args != ['']:
-                    for arg in args:
-                        _arg_match = re.fullmatch(r"(.*): (.*)", arg)
-                        assert _arg_match
-                        arg_name = _arg_match.group(1)
-                        arg_type = _arg_match.group(2)
-                        result += __parse_type(arg_type) + " " + arg_name + ", "
-                result = result.rstrip(", ") + ") {\n"
-                for stmt in node.body:
-                    result += pad(dfs(stmt, type_dict, state, depth + 1, path + node.name + "#")) + "\n"
-                result += "}\n"
-            else:
-                _match_noreturn = re.fullmatch(r"def \((.*)\)", fn_type)
-                if _match_noreturn:
-                    result += "void " + node.name + "("
-                    args = _match_noreturn.group(1).split(", ")
-                    if args != ['']:
-                        for arg in args:
-                            _arg_match = re.fullmatch(r"(.*): (.*)", arg)
-                            assert _arg_match
-                            arg_name = _arg_match.group(1)
-                            arg_type = _arg_match.group(2)
-                            result += __parse_type(arg_type) + " " + arg_name + ", "
-                    result = result.rstrip(", ") + ") {\n"
-                    for stmt in node.body:
-                        result += pad(dfs(stmt, type_dict, state, depth + 1, path + node.name + "#")) + "\n"
-                    result += "}\n"
-                else:
-                    raise ValueError(f"Invalid function type: {fn_type}")
-
+            fn_type = assert_type(type_ctx.get_vartype(loc), FunctionTypeData)
+            ret_type = fn_type.return_type
+            result += __parse_type(ret_type) + " " + node.name + "("
+            args = fn_type.args
+            if len(args) > 0:
+                for i, arg in enumerate(args):
+                    arg_name = node.args.args[i].arg
+                    arg_type = arg
+                    result += __parse_type(arg_type[1]) + " " + arg_name + ", "
+            result = result.rstrip(", ") + ") {\n"
+            for stmt in node.body:
+                result += pad(dfs(stmt, type_ctx, state, depth + 1, path + node.name + "#")) + "\n"
+            result += "}\n"
+            
         case ast.Return:
             assert type(node) == ast.Return
             value = node.value
-            if value is None:
+            if (type(value) == ast.Name and value.id == "void") or value is None:
                 result += "return;"
             else:
                 val, extra = __dfs_stmt(value)
                 if extra != "": result += extra + "\n"
                 result += "return " + unwrap_paren(val) + ";"
+
+        case ast.ClassDef:
+            assert type(node) == ast.ClassDef
+            
+            if any(
+                isinstance(dec, ast.Name) and dec.id == 'c_struct'
+                for dec in node.decorator_list
+            ): result = ""
+            else: raise NotImplementedError("Only @c_struct decorator is supported for class definitions")
+
         case ast.Import:
             assert type(node) == ast.Import
             if len(node.names) == 1 and node.names[0].name in ("sys", "py2cpp_header"):
                 pass
             else:
                 raise NotImplementedError("Only 'import py2cpp_header' is supported")
+
         case ast.ImportFrom:
             assert type(node) == ast.ImportFrom
             if node.module == "py2cpp_header":
                 pass
+    
         case ast.Continue:
             result += "continue;"
+
         case ast.Break:
             result += "break;"
+
         case ast.Global:
             assert type(node) == ast.Global
             raise SyntaxError(f"global statement is not supported (file: {state.origin_code}:{node.lineno})")
+
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
+
     return result
 
 
@@ -712,14 +726,14 @@ def dfs(node: ast.AST, type_dict: dict[str, str], state: State, depth: int = 0, 
 def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> str:
 
     _parse_types = get_time(parse_types) if verbose else parse_types
-    type_dict = _parse_types(text, str(path_here))
+    type_ctx = _parse_types(text, str(path_here))
 
     tree = ast.parse(text, filename=path)
     
     state = State(origin_code=text, setting=setting or Setting(minimize_namespace=[]))
-    code = "#include <iostream>\n"
+    code = ""
     _dfs = get_time(dfs) if verbose else dfs
-    code_body = _dfs(tree, type_dict, state=state)
+    code_body = _dfs(tree, type_ctx, state=state)
 
     include_set: set[str] = set()
     for b in state.used_builtins:
@@ -728,9 +742,20 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
     code += "\n"
 
     for name in state.setting.minimize_namespace:
-        code += "using " + NameDict[name] + ";\n"
+        builtin, full_name = NameDict[name]
+        if builtin in state.used_builtins:
+            code += f"using {full_name};\n"
 
-    code += "\n" + code_body
+    if not code.endswith("\n\n"):
+        code += "\n"
+    
+    for struct in type_ctx.struct_dict.values():
+        code += "struct " + struct.name + " {\n"
+        for field_name, field_type in struct.fields.items():
+            code += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
+        code += "};\n\n"
+    
+    code += code_body
     
     return code
 
@@ -772,4 +797,4 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
 
 if __name__ == "__main__":
     path_target = path_here / "test" / "main.py"
-    d = py_2_exe(path_target.read_text(), path=str(path_target), verbose=True, setting=Setting(minimize_namespace=["cout", "cin", "endl", "get", "string"]))
+    d = py_2_exe(path_target.read_text(), path=str(path_target), verbose=True, setting=Setting(minimize_namespace=["cout", "cin", "endl", "string", "get"]))

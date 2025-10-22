@@ -1,51 +1,108 @@
-from functools import cache
-from typing import Optional
+from typing import Optional, TypeAlias
+from dataclasses import dataclass
 import tempfile
 import re
 import ast
 
 from mypy import api
 
+GenericData: TypeAlias = "list[TypeData | GenericData]"
+
+@dataclass
+class TypeData:
+    type_: str
+    generics: GenericData
+    
+    @classmethod
+    def from_str(cls, type_str: str) -> "TypeData":
+        if type_str.startswith("def "):
+            return FunctionTypeData.from_str(type_str)
+        
+        if "[" not in type_str:
+            return cls(type_=type_str, generics=[])
+        
+        typename = type_str[:type_str.index("[")]
+        if not ("[" in type_str and type_str.endswith("]")):
+            return cls(type_=type_str, generics=[])
+        generics_str = type_str[type_str.index("[")+1:-1]
+        generics: GenericData = []
+        depth = 0
+        current_generic = ""
+        for char in generics_str:
+            if char == "[":
+                depth += 1
+                current_generic += char
+            elif char == "]":
+                depth -= 1
+                current_generic += char
+            elif char == "," and depth == 0:
+                generics.append(TypeData.from_str(current_generic.strip()))
+                current_generic = ""
+            else:
+                current_generic += char
+        if current_generic:
+            generics.append(TypeData.from_str(current_generic.strip()))
+        return cls(type_=typename, generics=generics)
+
+class FunctionTypeData(TypeData):
+    def __init__(self, args: list[tuple[str, TypeData]], return_type: TypeData):
+        super().__init__(type_="function", generics=[return_type])
+
+        self.args = args
+        self.return_type = return_type
+
+    @classmethod
+    def from_str(cls, type_str: str) -> "FunctionTypeData":
+        _match = re.fullmatch(r"def \((.*)\) -> (.*)", type_str)
+        args: list[tuple[str, TypeData]] = []
+        if _match:
+            ret_type = _match.group(2)
+
+            arg_string = _match.group(1)
+            if arg_string != "":
+                for arg in _match.group(1).split(", "):
+                    _arg_match = re.fullmatch(r"(.*): (.*)", arg)
+                    assert _arg_match
+                    arg_name = _arg_match.group(1)
+                    arg_type = _arg_match.group(2)
+                    args.append((arg_name, TypeData.from_str(arg_type)))
+            return cls(
+                args=args,
+                return_type=TypeData.from_str(ret_type)
+            )
+        else:
+            _match_noreturn = re.fullmatch(r"def \((.*)\)", type_str)
+            if _match_noreturn:
+                arg_string = _match_noreturn.group(1)
+                if arg_string != "":
+                    for arg in _match_noreturn.group(1).split(", "):
+                        _arg_match = re.fullmatch(r"(.*): (.*)", arg)
+                        assert _arg_match
+                        arg_name = _arg_match.group(1)
+                        arg_type = _arg_match.group(2)
+                        args.append((arg_name, TypeData.from_str(arg_type)))
+                return cls(
+                    args=args,
+                    return_type=TypeData(type_="builtins.None", generics=[])
+                )
+                
+        raise ValueError("Invalid function type", type_str)
+
+@dataclass
+class StructFieldData:
+    type_: TypeData
+    default: Optional[ast.expr] = None
+
+@dataclass
+class StructData:
+    name: str
+    fields: dict[str, StructFieldData]
+
 class RevealTypeInserter(ast.NodeTransformer):
     def __init__(self) -> None:
         self.scope_stack: list[Optional[str]] = []
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> list[ast.AST]:
-        self.scope_stack.append(node.name)
-        new_body: list[ast.stmt] = []
-
-        # 매개변수 reveal_type 삽입
-        for arg in node.args.args:
-            reveal_call = ast.Expr(
-                value=ast.Call(
-                    func=ast.Name(id='reveal_type', ctx=ast.Load()),
-                    args=[ast.Name(id=arg.arg, ctx=ast.Load())],
-                    keywords=[]
-                )
-            )
-            # AST attribute에 scope 저장
-            setattr(reveal_call, "scope", node.name)
-            setattr(reveal_call, "var_name", arg.arg)
-            new_body.append(reveal_call)
-
-        for stmt in node.body:
-            new_body.append(self.visit(stmt))
-
-        node.body = new_body
-        self.scope_stack.pop()
-
-        # 함수 이름 itself에 reveal_type
-        reveal_func = ast.Expr(
-            value=ast.Call(
-                func=ast.Name(id='reveal_type', ctx=ast.Load()),
-                args=[ast.Name(id=node.name, ctx=ast.Load())],
-                keywords=[]
-            )
-        )
-        setattr(reveal_func, "scope", None)
-        setattr(reveal_func, "var_name", node.name)
-
-        return [node, reveal_func]
+        self.revealed_structs: list[StructData] = []
 
     def visit_Assign(self, node: ast.Assign) -> list[ast.AST]:
         self.generic_visit(node)
@@ -85,6 +142,68 @@ class RevealTypeInserter(ast.NodeTransformer):
 
         return new_nodes
 
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> list[ast.AST]:
+        self.scope_stack.append(node.name)
+        new_body: list[ast.stmt] = []
+
+        # 매개변수 reveal_type 삽입
+        for arg in node.args.args:
+            reveal_call = ast.Expr(
+                value=ast.Call(
+                    func=ast.Name(id='reveal_type', ctx=ast.Load()),
+                    args=[ast.Name(id=arg.arg, ctx=ast.Load())],
+                    keywords=[]
+                )
+            )
+            # AST attribute에 scope 저장
+            setattr(reveal_call, "scope", node.name)
+            setattr(reveal_call, "var_name", arg.arg)
+            new_body.append(reveal_call)
+
+        for stmt in node.body:
+            new_body.append(self.visit(stmt))
+
+        node.body = new_body
+        self.scope_stack.pop()
+
+        # 함수 이름 itself에 reveal_type
+        reveal_func = ast.Expr(
+            value=ast.Call(
+            func=ast.Name(id='reveal_type', ctx=ast.Load()),
+            args=[ast.Name(id=node.name, ctx=ast.Load())],
+            keywords=[]
+            )
+        )
+        setattr(reveal_func, "scope", None)
+        setattr(reveal_func, "var_name", node.name)
+
+        return [node, reveal_func]
+        
+    def visit_ClassDef(self, node: ast.ClassDef) -> list[ast.AST]:
+        # if not at root level, raise
+        if self.scope_stack:
+            raise ValueError("Nested class definitions are not supported")
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+        # 데코레이터 확인: @c_struct가 있는지
+        has_c_struct = any(
+            isinstance(dec, ast.Name) and dec.id == 'c_struct'
+            for dec in node.decorator_list
+        )
+        
+        
+        if has_c_struct:
+            fields: dict[str, StructFieldData] = {}
+            for stmt in node.body:
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    field_name = stmt.target.id
+                    field_type = ast.unparse(stmt.annotation)
+                    fields[field_name] = StructFieldData(type_=TypeData.from_str(field_type), default=stmt.value)
+                    
+            self.revealed_structs.append(StructData(name=node.name, fields=fields))
+        return [node]
+
 
 def find_node_path(tree: ast.AST, target_node: ast.AST) -> Optional[list[ast.AST]]:
     """
@@ -112,32 +231,28 @@ def find_node_path(tree: ast.AST, target_node: ast.AST) -> Optional[list[ast.AST
         return path
     return None
 
-@cache
-def parse_func_type(type_str: str) -> tuple[list[tuple[str, str]], str]:
-    _match = re.fullmatch(r"def \((.*)\) -> (.*)", type_str)
-    if _match:
-        ret_type = _match.group(2)
-        args: list[tuple[str, str]] = []
-        
-        arg_string = _match.group(1)
-        if arg_string != "":
-            for arg in _match.group(1).split(", "):
-                _arg_match = re.fullmatch(r"(.*): (.*)", arg)
-                assert _arg_match
-                arg_name = _arg_match.group(1)
-                arg_type = _arg_match.group(2)
-                args.append((arg_name, arg_type))
-        return args, ret_type
-    raise ValueError("Invalid function type")
+@dataclass
+class TypeContext:
+    type_dict: dict[str, TypeData]
+    struct_dict: dict[str, StructData]
 
-def parse_types(text: str, path_scripts: str) -> dict[str, str]:
+    def get_vartype(self, key: str) -> TypeData:
+        if "." not in key:
+            return self.type_dict[key]
+        var, *attrs = key.split(".")
+        current_type = self.type_dict[var]
+        for attr in attrs:
+            struct_data = self.struct_dict[current_type.type_.split(".")[-1]]
+            field_data = struct_data.fields[attr]
+            current_type = field_data.type_
+        return current_type
+
+def parse_types(text: str, path_scripts: str) -> TypeContext:
 
     tree = ast.parse(text)
 
     transformer = RevealTypeInserter()
     transformer.visit(tree)
-    
-    
 
     ast.fix_missing_locations(tree)
     
@@ -154,9 +269,20 @@ def parse_types(text: str, path_scripts: str) -> dict[str, str]:
     result = api.run([tmp_path, "--strict", "--show-error-codes", "--no-error-summary"])
 
 
-    type_dict = {
-        "input": "def (prompt: builtins.str) -> builtins.str",
+    type_dict: dict[str, TypeData] = {
+        "input": FunctionTypeData(
+            args=[
+                ("prompt", TypeData(type_="builtins.str", generics=[]))
+            ], 
+            return_type=TypeData(type_="builtins.str", generics=[])),
+        #"def (prompt: builtins.str) -> builtins.str",
     }
+    
+    for struct in transformer.revealed_structs:
+        type_dict[struct.name] = TypeData(
+            type_= "type",
+            generics=[TypeData(type_=struct.name, generics=[])]
+        )
 
     for line in result[0].splitlines():
         if "Revealed type is" in line:
@@ -188,5 +314,14 @@ def parse_types(text: str, path_scripts: str) -> dict[str, str]:
                                 key = s + var_name
                             break
                 assert type_str != "Any", f"Type of {key} is Any"
-                type_dict[key] = type_str
-    return type_dict
+                type_dict[key] = TypeData.from_str(type_str)
+    
+    for struct in transformer.revealed_structs:
+        for field_name, field_data in struct.fields.items():
+            field_key = struct.name + "#" + field_name
+            if field_key in type_dict:
+                field_data.type_ = type_dict[field_key]
+            else:
+                raise ValueError(f"Field type for {field_key} not found in revealed types")
+
+    return TypeContext(type_dict=type_dict, struct_dict={s.name: s for s in transformer.revealed_structs})

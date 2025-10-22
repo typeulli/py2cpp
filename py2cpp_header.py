@@ -1,4 +1,4 @@
-from typing import Protocol, TypeAlias, TypeVar
+from typing import Protocol, TypeVar, cast
 
 T = TypeVar("T")
 def c_struct(cls: T) -> T:
@@ -152,4 +152,25 @@ class c_bool(Protocol):
     def __or__(self, other: "c_bool") -> "c_bool": ...
     def __xor__(self, other: "c_bool") -> "c_bool": ...
     def __invert__(self) -> "c_bool": ...
-c_void: TypeAlias = None
+
+class c_void: ...
+void = c_void()
+
+__all__ = [
+    "cast",
+    "c_struct",
+    "c_int",
+    "c_uint",
+    "c_short",
+    "c_ushort",
+    "c_long",
+    "c_ulong",
+    "c_longlong",
+    "c_ulonglong",
+    "c_float",
+    "c_double",
+    "c_char",
+    "c_bool",
+    "c_void",
+    "void"
+]

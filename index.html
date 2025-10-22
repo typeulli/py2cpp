@@ -72,45 +72,62 @@
         <button onclick="convertCode()">Convert</button>
     </div>
     <script>
-            const DEFAULT_PYTHON_CODE = `def get_fibonacci(n: int) -> int:
-    l = [0, 1]
-    for i in range(2, n):
-        l.append(l[i - 1] + l[i - 2])
-    return l.pop(n - 1)
+            const DEFAULT_PYTHON_CODE = `from py2cpp_header import *
+import py2cpp_header
 
-def run() -> None:
+@c_struct
+class fiboset:
+    a: c_ulonglong
+    b: c_ulonglong
+
+def get_fibonacci(n: int) -> c_ulonglong:
+    l = fiboset()
+    l.a = cast("py2cpp_header.c_ulonglong", 0)
+    l.b = cast("py2cpp_header.c_ulonglong", 1)
+    for _ in range(n):
+        l2 = fiboset()
+        l2.a = l.b
+        l2.b = l.a + l.b
+        l = l2
+    return l.a
+
+def run() -> c_void:
     while True:
         s = input("input fibonacci index: ")
         if s == "exit":
-            return
+            return void
         print(get_fibonacci(int(s)))
 
 run()`;
             const DEFAULT_CPP_CODE = `#include <iostream>
 #include <string>
-using std::string;
-#include <vector>
-using std::vector;
 
-long get_fibonacci(long n) {
-    vector<long> l = {0, 1};
-    for (long i = 2; i < n; i += 1) {
-        l.push_back(l[i - 1] + l[i - 2]);
+struct fiboset {
+    unsigned long long a;
+    unsigned long long b;
+};
+
+unsigned long long get_fibonacci(long n) {
+    fiboset l = fiboset();
+    l.a = (unsigned long long)(0);
+    l.b = (unsigned long long)(1);
+    for (long _ = 0; _ < n; _ += 1) {
+        fiboset l2 = fiboset();
+        l2.a = l.b;
+        l2.b = l.a + l.b;
+        l = l2;
     }
-    returnauto xiWYvYp3 = l;
-    auto yf0Hw7x6 = xiWYvYp3[(n - 1)];
-    xiWYvYp3.erase(xiWYvYp3.begin() + (n - 1));
-    return yf0Hw7x6;
+    return l.a;
 }
 
 void run() {
     while (true) {
         std::cout << "input fibonacci index: ";
-        std::string d5KcLGYs;
-        std::getline(std::cin, d5KcLGYs);
-        string s = d5KcLGYs;
+        std::string M5hxi6Ry;
+        std::getline(std::cin, M5hxi6Ry);
+        std::string s = M5hxi6Ry;
         if (s == "exit") {
-            returnreturn;
+            return;
         }
         std::cout << get_fibonacci(std::stol(s)) << std::endl;
     }
