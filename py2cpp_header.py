@@ -1,8 +1,14 @@
-from typing import Protocol, TypeVar, cast
+from typing import Generic, Protocol, TypeVar, cast, Literal
 
 T = TypeVar("T")
+N = TypeVar("N", bound=int)
+
 def c_struct(cls: T) -> T:
     return cls
+
+class c_array(list[T], Generic[T, N]):
+    def __init__(self, length: int):
+        super().__init__([cast(T, None)] * length)
 
 class c_int(Protocol):
     def __int__(self) -> int: ...
@@ -158,7 +164,9 @@ void = c_void()
 
 __all__ = [
     "cast",
+    "Literal",
     "c_struct",
+    "c_array",
     "c_int",
     "c_uint",
     "c_short",

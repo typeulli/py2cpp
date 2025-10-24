@@ -38,6 +38,14 @@
             margin-top: 30px; 
             text-align: center;
         }
+        .option {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-right: 16px;
+            font-size: 1rem;
+            color: #2c3e50;
+        }
         button {
             background-color: #2196f3;
             color: white;
@@ -69,13 +77,14 @@
         </div>
     </div>
     <div id="controls">
+        <label class="option">
+            <input type="checkbox" id="use-py2cpp" checked>
+            Use py2cpp header
+        </label>
         <button onclick="convertCode()">Convert</button>
     </div>
     <script>
-            const DEFAULT_PYTHON_CODE = `from py2cpp_header import *
-import py2cpp_header
-
-@c_struct
+            const DEFAULT_PYTHON_CODE = `@c_struct
 class fiboset:
     a: c_ulonglong
     b: c_ulonglong
@@ -109,8 +118,8 @@ struct fiboset {
 
 unsigned long long get_fibonacci(long n) {
     fiboset l = fiboset();
-    l.a = (unsigned long long)(0);
-    l.b = (unsigned long long)(1);
+    l.a = static_cast<unsigned long long>(0);
+    l.b = static_cast<unsigned long long>(1);
     for (long _ = 0; _ < n; _ += 1) {
         fiboset l2 = fiboset();
         l2.a = l.b;
@@ -123,9 +132,9 @@ unsigned long long get_fibonacci(long n) {
 void run() {
     while (true) {
         std::cout << "input fibonacci index: ";
-        std::string M5hxi6Ry;
-        std::getline(std::cin, M5hxi6Ry);
-        std::string s = M5hxi6Ry;
+        std::string w_0KFvdk;
+        std::getline(std::cin, w_0KFvdk);
+        std::string s = w_0KFvdk;
         if (s == "exit") {
             return;
         }
@@ -140,7 +149,7 @@ int main() {
 
 
         var pyEditor, cppEditor;
-        require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }});
+        require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs' }}); 
         require(['vs/editor/editor.main'], function() {
             pyEditor = monaco.editor.create(document.getElementById('py-editor'), {
                 value: DEFAULT_PYTHON_CODE,
@@ -156,10 +165,23 @@ int main() {
         });
 
         function convertCode() {
+            const useHeader = document.getElementById('use-py2cpp');
+            let code = pyEditor.getValue();
+
+            // If checkbox is checked, prepend header lines unless they already exist.
+            if (useHeader && useHeader.checked) {
+                const hasFrom = /from\s+py2cpp_header\s+import\s+\*/.test(code);
+                const hasImport = /import\s+py2cpp_header/.test(code);
+                let header = '';
+                if (!hasFrom) header += 'from py2cpp_header import *\n';
+                if (!hasImport) header += 'import py2cpp_header\n';
+                if (header) code = header + '\n' + code;
+            }
+
             fetch('/py2cpp/convert', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code: pyEditor.getValue() })
+                body: JSON.stringify({ code: code })
             })
             .then(response => response.json())
             .then(data => {

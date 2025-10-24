@@ -1,18 +1,18 @@
-from dataclasses import dataclass, field
-from pathlib import Path
 import ast
 import random
 import shutil
-import time
 import tempfile
-from typing import TypeVar, ParamSpec, Callable
+import time
+from dataclasses import dataclass, field
 from functools import wraps
+from pathlib import Path
+from typing import Callable, ParamSpec, TypeVar
 
+import click
 
 from utils.util_string import pad, unwrap_paren
-from utils.util_type import FunctionTypeData, TypeContext, TypeData, parse_types
+from utils.util_type import FunctionTypeData, parse_types, TypeContext, TypeData
 from utils.util_code import assert_type
-
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -30,9 +30,6 @@ path_here = Path(__file__).parent
 
 path_builtins = path_here / "builtins"
 
-
-
-
 def _builtins_getIdx(last_idx: list[int] = [0]) -> int:
     v = last_idx[0]
     last_idx[0] += 1
@@ -43,26 +40,25 @@ class Builtins:
     include: str
     inline: bool = False
     requires: list["Builtins"] = field(default_factory=lambda: [])
-    
+
     idx: int = field(default_factory=_builtins_getIdx)
-    
-    
+
     def toString(self, include_set: set[str]) -> str:
         if self.include in include_set:
             return ""
-        
+
         include_set.add(self.include)
-        
+
         result = ""
-        
+
         for req in self.requires:
             result = req.toString(include_set) + result
-            
+
         if self.inline:
             result += self.include + "\n"
         else:
             result += (path_builtins / str(self.include)).read_text(encoding="utf-8") + "\n"
-        
+
         return result
 
     def __hash__(self):
@@ -125,7 +121,6 @@ class StmtState:
     def collect_extra_codes(self) -> str:
         return "\n".join(self.extra_codes)
 
-
 @dataclass
 class ScriptTemplate:
     code: str
@@ -136,15 +131,15 @@ class ScriptTemplate:
 
     def __post_init__(self):
         self.code = self.code.lstrip("\n").rstrip("\n")
-    
+
     def format(self, stmt_state: StmtState, **kwargs: str) -> str:
         state = stmt_state.state
         __get_tempid = lambda: state.get_tempid()
-        
+
         tmp_vars = {tmp: __get_tempid() for tmp in self.require_tmps}
         for var in self.require_vars:
             assert var in kwargs, f"Missing variable '{var}' for template"
-    
+
         names = {"__"+name: state.get_name(name) for name in self.require_names}
 
         stmt_state.extra_codes.append(self.code.format(**tmp_vars, **kwargs, **names))
@@ -241,19 +236,18 @@ def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
 
     if data.type_ in type_ctx.struct_dict:
         return type_ctx.struct_dict[data.type_].name
-    
+
     dot_index = data.type_.find(".")
     if dot_index != -1:
         if dot_index > data.type_.find("["):
             return __parse_type(TypeData(type_=data.type_[dot_index+1:], generics=data.generics))
-    
 
     raise ValueError(f"Unknown type: {data.type_}")
 
 def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: str = "") -> str:
-    
+
     state = stmt_state.state
-    
+
     def __dfs_stmt(node: ast.AST) -> str:
         return dfs_stmt(node, type_ctx, stmt_state, path)
 
@@ -263,54 +257,58 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
             if type(node.value) == bool:
                 return "true" if node.value else "false"
             return state.origin_code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
-        
+
         case ast.Attribute:
             assert type(node) == ast.Attribute
             return __dfs_stmt(node.value) + "." + node.attr
-        
+
         case ast.List:
             assert type(node) == ast.List
             return "{" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + "}"
-        
+
         case ast.Tuple:
             assert type(node) == ast.Tuple
             return "std::make_tuple(" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + ")"
-        
+
         case ast.Call:
             assert type(node) == ast.Call
             func = node.func
             if type(func) == ast.Name:
-                if func.id == "cast":
-                    assert len(node.args) == 2
-                    type_str = node.args[0]
-                    val = node.args[1]
-                    assert type(type_str) == ast.Constant and type(type_str.value) == str
-                    parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
-                    return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
-                if func.id == "print":
-                    keywords = node.keywords
-                    
-                    kw_end = state.get_name("endl")
-                    kw_sep = "\" \""
+                match func.id:
+                    case "cast":
+                        assert len(node.args) == 2
+                        type_str = node.args[0]
+                        val = node.args[1]
+                        assert type(type_str) == ast.Constant and type(type_str.value) == str
+                        parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
+                        return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
+                    case "print":
+                        keywords = node.keywords
 
-                    for kwd in keywords:
-                        if kwd.arg == "end":
-                            kw_end = __dfs_stmt(kwd.value)
-                        if kwd.arg == "sep":
-                            kw_sep = __dfs_stmt(kwd.value)
-                    return state.get_name("cout") + " << " + (" << " + kw_sep + " << ").join(__dfs_stmt(arg) for arg in node.args) + " << " + kw_end
-                if func.id == "input":
-                    if len(node.args) == 0:
-                        return Template_Input_NoPrompt.format(stmt_state)
-                    return Template_Input_WithPrompt.format(stmt_state, prompt=__dfs_stmt(node.args[0]))
-                if func.id == "int":
-                    return "std::stol(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
-                if func.id == "float":
-                    return "std::stod(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
-                if func.id == "exit":
-                    state.used_builtins.add(CStdLib)
-                    return "std::exit(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
-                return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
+                        kw_end = state.get_name("endl")
+                        kw_sep = "\" \""
+
+                        for kwd in keywords:
+                            if kwd.arg == "end":
+                                kw_end = __dfs_stmt(kwd.value)
+                            if kwd.arg == "sep":
+                                kw_sep = __dfs_stmt(kwd.value)
+                        return state.get_name("cout") + " << " + (" << " + kw_sep + " << ").join(__dfs_stmt(arg) for arg in node.args) + " << " + kw_end
+                    case "input":
+                        if len(node.args) == 0:
+                            return Template_Input_NoPrompt.format(stmt_state)
+                        return Template_Input_WithPrompt.format(stmt_state, prompt=__dfs_stmt(node.args[0]))
+                    case "int":
+                        return "std::stol(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
+                    case "float":
+                        return "std::stod(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
+                    case "exit":
+                        state.used_builtins.add(CStdLib)
+                        return "std::exit(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
+                    case "c_array":
+                        return "{}"
+                    case _:
+                        return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
 
             if type(func) == ast.Attribute:
                 target_type = eval_type(func.value, type_ctx, state, path)
@@ -368,7 +366,7 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
 
         case ast.BinOp:
             assert type(node) == ast.BinOp
-            
+
             ops: dict[type[ast.operator], str] = {
                 ast.Add: "+",
                 ast.Sub: "-",
@@ -439,7 +437,7 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
     raise RuntimeError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
 def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
-    
+
     def __dfs(node: ast.AST) -> str:
         return dfs(node, type_ctx, state, depth + 1, path)
     def __dfs_stmt(node: ast.AST) -> tuple[str, str]:
@@ -448,10 +446,9 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
         return _val, stmt_state.collect_extra_codes
     def __parse_type(type_: TypeData) -> str:
         return parse_type(type_, type_ctx, state)
-    
-    
+
     result: str = ""
-    
+
     if depth == 0:
         children: list[ast.AST] = list(ast.iter_child_nodes(node))
         children_preload: list[ast.FunctionDef] = []
@@ -461,7 +458,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 children_preload.append(child)
             else:
                 children_main.append(child)
-        
+
         for child in children_preload:
             result += __dfs(child) + "\n"
         result += "int main() {\n"
@@ -472,35 +469,49 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
         result += "    return 0;\n}\n"
         return result.strip("\n")
 
-        
     match type(node):
         case ast.Assign:
             assert type(node) == ast.Assign
-            
+
             if len(node.targets) == 1:
                 target = node.targets[0]
-                target_attr_path: list[str] = []
+                target_str: str = ""
+                is_direct_access = True
                 while True:
                     match type(target):
                         case ast.Attribute:
                             assert type(target) == ast.Attribute
-                            
-                            target_attr_path.insert(0, target.attr)
+                            is_direct_access = False
+
+                            target_str = "." + target.attr + target_str
                             target_new = target.value
                             assert type(target_new) == ast.Name or type(target_new) == ast.Attribute, "Only simple variable assignment is supported" + str(ast.dump(target))
                             target = target_new
                             continue
+                        
+                        case ast.Subscript:
+                            assert type(target) == ast.Subscript
+                            is_direct_access = False
+                            
+                            val, extra = __dfs_stmt(target.slice)
+                            if extra != "": result += extra + "\n"
+
+                            target_str = "[" + unwrap_paren(val) + "]" + target_str
+                            target_new = target.value
+                            assert type(target_new) == ast.Name or type(target_new) == ast.Attribute, "Only simple variable assignment is supported" + str(ast.dump(target))
+                            target = target_new
+                            continue
+                            
                         case ast.Name:
-                            target_attr_path.insert(0, assert_type(target, ast.Name).id)
+                            target_str = assert_type(target, ast.Name).id + target_str
                             break
                         case _:
-                            raise NotImplementedError("Only simple variable assignment is supported" + str(ast.dump(target)))
+                            raise NotImplementedError("Only simple variable assignment is supported " + str(ast.dump(target)))
                     break
-                
-                target_str = ".".join(target_attr_path)
-                
+
+
                 loc = path + target_str
-                if len(target_attr_path) != 1 or loc in state.defined:
+                if not is_direct_access or loc in state.defined:
                     val, extra = __dfs_stmt(node.value)
                     if extra != "": result += extra + "\n"
 
@@ -509,9 +520,21 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                     val, extra = __dfs_stmt(node.value)
                     if extra != "": result += extra + "\n"
 
-                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target_str + " = " + unwrap_paren(val) + ";"
+                    type_data = type_ctx.get_vartype(loc)
+
+                    if type_data.type_ == "py2cpp_header.c_array":
+                        assert len(type_data.generics) == 2
+                        base_type = __parse_type(assert_type(type_data.generics[0], TypeData))
+                        array_size_literal = type_data.generics[1]
+                        assert type(array_size_literal) == TypeData and array_size_literal.type_ == "Literal" and len(array_size_literal.generics) == 1
+                        array_size_data = array_size_literal.generics[0]
+                        assert type(array_size_data) == TypeData and array_size_data.type_.isdigit()
+                        result += base_type + " " + target_str + "[" + str(array_size_data.type_) + "] = " + val + ";"
+                    else:
+                        type_ = __parse_type(type_data)
+                        result += type_ + " " + target_str + " = " + unwrap_paren(val) + ";"
                     state.defined[loc] = True
-                    
+
             else:
                 targets = node.targets
                 for target in targets:
@@ -527,25 +550,36 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             assert type(node) == ast.AnnAssign
             target = node.target
             value = node.value
-            
+
             assert value is not None, "AnnAssign without value is not supported"
-            
+
             if type(target) == ast.Name:
                 loc = path + target.id
                 if loc in state.defined:
                     val, extra = __dfs_stmt(value)
                     if extra != "": result += extra + "\n"
-                    
+
                     result += path + " = " + val + ";"
                 else:
                     val, extra = __dfs_stmt(value)
                     if extra != "": result += extra + "\n"
-                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target.id + " = " + val + ";"
+                    type_data = type_ctx.get_vartype(loc)
+                    if type_data.type_ == "py2cpp_header.c_array":
+                        assert len(type_data.generics) == 2
+                        base_type = __parse_type(assert_type(type_data.generics[0], TypeData))
+                        array_size_literal = type_data.generics[1]
+                        assert type(array_size_literal) == TypeData and array_size_literal.type_ == "Literal" and len(array_size_literal.generics) == 1
+                        array_size_data = array_size_literal.generics[0]
+                        assert type(array_size_data) == TypeData and array_size_data.type_.isdigit()
+                        result += base_type + " " + target.id + "[" + str(array_size_data.type_) + "] = " + val + ";"
+                    else:
+                        type_ = __parse_type(type_data)
+                        result += type_ + " " + target.id + " = " + val + ";"
                     state.defined[loc] = True
-        
+
         case ast.AugAssign:
             assert type(node) == ast.AugAssign
-            
+
             target = node.target
             if type(target) == ast.Name:
                 loc = path + target.id
@@ -565,8 +599,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 val, extra = __dfs_stmt(node.value)
                 if extra != "":
                     result += extra + "\n"
-                    
-                    
+
                 if loc in state.defined:
                     result += target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
                 else:
@@ -578,11 +611,11 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             val, extra = __dfs_stmt(node.value)
             if extra != "": result += extra + "\n"
             result += val + ";"
+
         case ast.If:
             assert type(node) == ast.If
             val, extra = __dfs_stmt(node.test)
             if extra != "": result += extra + "\n"
-
 
             result += "if (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
@@ -596,21 +629,21 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                     for stmt in node.orelse:
                         result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
                     result += "}"
+
         case ast.For:
             assert type(node) == ast.For
-            
+
             target = node.target
             iter = node.iter
             body = node.body
             if type(target) == ast.Name:
                 if type(iter) == ast.Call and type(iter.func) == ast.Name and iter.func.id == "range":
                     loc = path + target.id
-                    
+
                     if len(iter.args) == 1:
                         val_end, extra = __dfs_stmt(iter.args[0])
                         if extra != "": result += extra + "\n"
-                        
-                        
+
                         start = "0"
                         end = val_end
                         step = "1"
@@ -649,7 +682,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
         case ast.While:
             assert type(node) == ast.While
-            
+
             val, extra = __dfs_stmt(node.test)
             if extra != "": result += extra + "\n"
 
@@ -660,6 +693,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
         case ast.FunctionDef:
             assert type(node) == ast.FunctionDef
+
             loc = path + node.name
             fn_type = assert_type(type_ctx.get_vartype(loc), FunctionTypeData)
             ret_type = fn_type.return_type
@@ -674,9 +708,10 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             for stmt in node.body:
                 result += pad(dfs(stmt, type_ctx, state, depth + 1, path + node.name + "#")) + "\n"
             result += "}\n"
-            
+
         case ast.Return:
             assert type(node) == ast.Return
+
             value = node.value
             if (type(value) == ast.Name and value.id == "void") or value is None:
                 result += "return;"
@@ -687,7 +722,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
         case ast.ClassDef:
             assert type(node) == ast.ClassDef
-            
+
             if any(
                 isinstance(dec, ast.Name) and dec.id == 'c_struct'
                 for dec in node.decorator_list
@@ -705,7 +740,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             assert type(node) == ast.ImportFrom
             if node.module == "py2cpp_header":
                 pass
-    
+
         case ast.Continue:
             result += "continue;"
 
@@ -721,15 +756,13 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
     return result
 
-
-
 def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> str:
 
     _parse_types = get_time(parse_types) if verbose else parse_types
     type_ctx = _parse_types(text, str(path_here))
 
     tree = ast.parse(text, filename=path)
-    
+
     state = State(origin_code=text, setting=setting or Setting(minimize_namespace=[]))
     code = ""
     _dfs = get_time(dfs) if verbose else dfs
@@ -738,7 +771,7 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
     include_set: set[str] = set()
     for b in state.used_builtins:
         code += b.toString(include_set)
-        
+
     code += "\n"
 
     for name in state.setting.minimize_namespace:
@@ -748,30 +781,33 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
 
     if not code.endswith("\n\n"):
         code += "\n"
-    
+
     for struct in type_ctx.struct_dict.values():
         code += "struct " + struct.name + " {\n"
         for field_name, field_type in struct.fields.items():
             code += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
         code += "};\n\n"
-    
+
     code += code_body
-    
+
     return code
 
 def build_cpp_to_exe(cpp_code: str, output_path: str):
     import subprocess
+    
     with tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False) as f:
         f.write(cpp_code)
         tmp_cpp_path = f.name
 
-    compile_command = ["g++", tmp_cpp_path, "-o", output_path, "-std=c++11"]
+    try:
+        compile_command = ["g++", tmp_cpp_path, "-o", output_path, "-std=c++11"]
+        result = subprocess.run(compile_command, capture_output=True, text=True)
 
-    result = subprocess.run(compile_command, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        raise RuntimeError(f"Compilation failed: {result.stderr}")
-    return
+        if result.returncode != 0:
+            raise RuntimeError(f"Compilation failed:\n{result.stderr}")
+        
+    finally:
+        Path(tmp_cpp_path).unlink()
 
 def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: bool = False):
     path_target = Path(path)
@@ -782,12 +818,10 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
     path_temp.mkdir(exist_ok=True)
 
     (path_temp / (path_target.stem + ".cpp")).write_text(code, encoding="utf-8")
-    
-    
+
     _build_cpp_to_exe = get_time(build_cpp_to_exe) if verbose else build_cpp_to_exe
     _build_cpp_to_exe(code, str(path_temp / (path_target.stem + ".exe")))
 
-    
     result_name = (path_target.parent) / (path_target.stem + ".exe")
     if result_name.exists():
         result_name.unlink()
@@ -795,6 +829,26 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
 
     shutil.rmtree(path_temp)
 
+@click.command()
+@click.option('-i', '--input', 'input_path', required=True, type=click.Path(exists=True), help='Path to the input Python file.')
+@click.option('-o', '--output', 'output_path', required=False, type=click.Path(), help='Path to the output executable file.')
+@click.option('-c', '--compile', 'compile_target', required=False, type=click.Choice(['cpp', 'exe']), default='cpp', help='Target compilation format.')
+def cli(input_path: str, output_path: str | None, compile_target: str):
+    setting = Setting(minimize_namespace=["string", "vector", "cout", "cin", "endl", "get"])
+
+    input_path_obj = Path(input_path)
+    output_path_obj = Path(output_path) if output_path else input_path_obj.with_suffix("." + compile_target)
+
+    python_code = input_path_obj.read_text(encoding="utf-8")
+
+    match compile_target or "cpp":
+        case 'cpp':
+            cpp_code = py_2_cpp(python_code, path=str(input_path_obj), setting=setting)
+            output_path_obj.write_text(cpp_code, encoding="utf-8")
+        case 'exe':
+            py_2_exe(python_code, path=str(output_path_obj), verbose=True, setting=setting)
+        case _:
+            raise ValueError("Invalid compile target specified: " + str(compile_target))
+
 if __name__ == "__main__":
-    path_target = path_here / "test" / "main.py"
-    d = py_2_exe(path_target.read_text(), path=str(path_target), verbose=True, setting=Setting(minimize_namespace=["cout", "cin", "endl", "string", "get"]))
+    cli()
