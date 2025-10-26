@@ -1,14 +1,28 @@
-from typing import Generic, Protocol, TypeVar, cast, Literal
+from typing import Generic, Protocol, SupportsIndex, TypeVar
+from typing import cast, Literal, Final
 
 T = TypeVar("T")
 N = TypeVar("N", bound=int)
 
-def c_struct(cls: T) -> T:
+class c_void: ...
+void: Final[c_void] = c_void()
+
+class c_global:
+    def __enter__(self) -> "c_global":
+        return self
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        pass
+
+def c_struct(cls: type[T]) -> type[T]:
     return cls
 
 class c_array(list[T], Generic[T, N]):
     def __init__(self, length: int):
         super().__init__([cast(T, None)] * length)
+    def append(self, _: T) -> None: raise NotImplementedError("append is not supported for c_array")
+    def remove(self, _: T) -> None: raise NotImplementedError("remove is not supported for c_array")
+    def insert(self, index: SupportsIndex, _: T) -> None: raise NotImplementedError("insert is not supported for c_array")
+    def pop(self, index: SupportsIndex = 0) -> T: raise NotImplementedError("pop is not supported for c_array")
 
 class c_int(Protocol):
     def __int__(self) -> int: ...
@@ -159,26 +173,21 @@ class c_bool(Protocol):
     def __xor__(self, other: "c_bool") -> "c_bool": ...
     def __invert__(self) -> "c_bool": ...
 
-class c_void: ...
-void = c_void()
-
 __all__ = [
-    "cast",
-    "Literal",
+    "cast", "Literal", "Final",
+    
+    "c_void", "void",
+    
+    "c_global",
+    
     "c_struct",
     "c_array",
-    "c_int",
-    "c_uint",
-    "c_short",
-    "c_ushort",
-    "c_long",
-    "c_ulong",
-    "c_longlong",
-    "c_ulonglong",
-    "c_float",
-    "c_double",
-    "c_char",
+    
     "c_bool",
-    "c_void",
-    "void"
+    "c_char",
+    "c_int",      "c_uint",
+    "c_short",    "c_ushort",
+    "c_long",     "c_ulong",
+    "c_longlong", "c_ulonglong",
+    "c_float",    "c_double"
 ]

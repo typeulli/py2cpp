@@ -275,7 +275,6 @@ def parse_types(text: str, path_scripts: str) -> TypeContext:
                 ("prompt", TypeData(type_="builtins.str", generics=[]))
             ], 
             return_type=TypeData(type_="builtins.str", generics=[])),
-        #"def (prompt: builtins.str) -> builtins.str",
     }
     
     for struct in transformer.revealed_structs:

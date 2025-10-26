@@ -93,6 +93,7 @@ class Setting:
 @dataclass
 class State:
     origin_code: str
+    global_code: str = ""
     defined: dict[str, bool] = field(default_factory=lambda: dict[str, bool]())
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
     used_tempids: set[str] = field(default_factory=lambda: set[str]())
@@ -216,6 +217,10 @@ type_alias = {
     "builtins.float": "double",
     "builtins.bool": "bool",
 }
+
+for _key, _value in type_alias.copy().items():
+    type_alias[_key[_key.rfind(".")+1:]] = _value
+
 def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
     def __parse_type(data: TypeData) -> str:
         return parse_type(data, type_ctx, state)
@@ -552,6 +557,14 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             value = node.value
 
             assert value is not None, "AnnAssign without value is not supported"
+            
+            is_const = False
+            annotation = node.annotation
+            if type(annotation) == ast.Subscript:
+                type_target = annotation.value
+                if type(type_target) == ast.Name and type_target.id == "Final":
+                    is_const = True
+            const_str = "const " if is_const else ""
 
             if type(target) == ast.Name:
                 loc = path + target.id
@@ -571,10 +584,10 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                         assert type(array_size_literal) == TypeData and array_size_literal.type_ == "Literal" and len(array_size_literal.generics) == 1
                         array_size_data = array_size_literal.generics[0]
                         assert type(array_size_data) == TypeData and array_size_data.type_.isdigit()
-                        result += base_type + " " + target.id + "[" + str(array_size_data.type_) + "] = " + val + ";"
+                        result += f"{const_str}{base_type} {target.id}[{str(array_size_data.type_)}] = {val};"
                     else:
                         type_ = __parse_type(type_data)
-                        result += type_ + " " + target.id + " = " + val + ";"
+                        result += f"{const_str}{type_} {target.id} = {val};"
                     state.defined[loc] = True
 
         case ast.AugAssign:
@@ -599,12 +612,18 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 val, extra = __dfs_stmt(node.value)
                 if extra != "":
                     result += extra + "\n"
+                    
+                op = _op_to_str[type(node.op)]
 
-                if loc in state.defined:
-                    result += target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
+                assert loc in state.defined, "AugAssign to undefined variable is not supported"
+                
+                if op == "+=" and val == "1":
+                    result += "++" + target.id + ";"
+                elif op == "-=" and val == "1":
+                    result += "--" + target.id + ";"
                 else:
-                    result += __parse_type(type_ctx.get_vartype(loc)) + " " + target.id + " " + _op_to_str[type(node.op)] + " " + val + ";"
-                    state.defined[loc] = True
+                    result += target.id + " " + op + " " + val + ";"
+                
 
         case ast.Expr:
             assert type(node) == ast.Expr
@@ -669,7 +688,12 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                         step = val_step
                     else:
                         raise ValueError("Invalid number of arguments for range()")
-                    result += "for (" + ("long " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + target.id + " += " + step + ") {\n"
+                    
+                    exp_change = target.id + " += " + step
+                    if step == "1": exp_change = "++" + target.id
+                    if step == "-1": exp_change = "--" + target.id
+                    
+                    result += "for (" + ("long " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + exp_change + ") {\n"
                 else:
                     val, extra = __dfs_stmt(iter)
                     if extra != "": result += extra + "\n"
@@ -706,7 +730,9 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                     result += __parse_type(arg_type[1]) + " " + arg_name + ", "
             result = result.rstrip(", ") + ") {\n"
             for stmt in node.body:
-                result += pad(dfs(stmt, type_ctx, state, depth + 1, path + node.name + "#")) + "\n"
+                newline = dfs(stmt, type_ctx, state, depth + 1, path + node.name + "#")
+                if newline != "":
+                    result += pad(newline) + "\n"
             result += "}\n"
 
         case ast.Return:
@@ -751,6 +777,18 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             assert type(node) == ast.Global
             raise SyntaxError(f"global statement is not supported (file: {state.origin_code}:{node.lineno})")
 
+        case ast.With:
+            assert type(node) == ast.With
+
+            assert len(node.items) == 1, "Only single item 'with' statement is supported"
+            ctx_expr = node.items[0].context_expr
+            
+            if type(ctx_expr) == ast.Call and type(ctx_expr.func) == ast.Name and ctx_expr.func.id == "c_global":
+                for stmt in node.body:
+                    state.global_code += dfs(stmt, type_ctx, state, depth, path) + "\n"
+            else:
+                raise NotImplementedError("Only 'with c_global()' statement is supported")
+
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
@@ -787,6 +825,8 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
         for field_name, field_type in struct.fields.items():
             code += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
         code += "};\n\n"
+        
+    code += state.global_code.strip("\n") + "\n\n"
 
     code += code_body
 
