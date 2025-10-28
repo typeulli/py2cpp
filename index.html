@@ -91,8 +91,8 @@ class fiboset:
 
 def get_fibonacci(n: int) -> c_ulonglong:
     l = fiboset()
-    l.a = cast("py2cpp_header.c_ulonglong", 0)
-    l.b = cast("py2cpp_header.c_ulonglong", 1)
+    l.a = c_static_cast("c_ulonglong", 0)
+    l.b = c_static_cast("c_ulonglong", 1)
     for _ in range(n):
         l2 = fiboset()
         l2.a = l.b
@@ -100,9 +100,12 @@ def get_fibonacci(n: int) -> c_ulonglong:
         l = l2
     return l.a
 
+with c_global():
+    prompt = "input fibonacci index: "
+
 def run() -> c_void:
     while True:
-        s = input("input fibonacci index: ")
+        s = input(prompt)
         if s == "exit":
             return void
         print(get_fibonacci(int(s)))
@@ -116,11 +119,13 @@ struct fiboset {
     unsigned long long b;
 };
 
+std::string prompt = "input fibonacci index: ";
+
 unsigned long long get_fibonacci(long n) {
     fiboset l = fiboset();
     l.a = static_cast<unsigned long long>(0);
     l.b = static_cast<unsigned long long>(1);
-    for (long _ = 0; _ < n; _ += 1) {
+    for (long _ = 0; _ < n; ++_) {
         fiboset l2 = fiboset();
         l2.a = l.b;
         l2.b = l.a + l.b;
@@ -131,7 +136,7 @@ unsigned long long get_fibonacci(long n) {
 
 void run() {
     while (true) {
-        std::cout << "input fibonacci index: ";
+        std::cout << prompt;
         std::string w_0KFvdk;
         std::getline(std::cin, w_0KFvdk);
         std::string s = w_0KFvdk;

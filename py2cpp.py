@@ -280,7 +280,14 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
             func = node.func
             if type(func) == ast.Name:
                 match func.id:
-                    case "cast":
+                    case "c_cast":
+                        assert len(node.args) == 2
+                        type_str = node.args[0]
+                        val = node.args[1]
+                        assert type(type_str) == ast.Constant and type(type_str.value) == str
+                        parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
+                        return f"({parsed_type})({unwrap_paren(__dfs_stmt(val))})"
+                    case "c_static_cast":
                         assert len(node.args) == 2
                         type_str = node.args[0]
                         val = node.args[1]
@@ -475,6 +482,11 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
         return result.strip("\n")
 
     match type(node):
+        
+        case ast.Pass:
+            assert type(node) == ast.Pass
+            return ""
+        
         case ast.Assign:
             assert type(node) == ast.Assign
 
@@ -825,8 +837,10 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
         for field_name, field_type in struct.fields.items():
             code += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
         code += "};\n\n"
-        
-    code += state.global_code.strip("\n") + "\n\n"
+    
+    state.global_code = state.global_code.strip("\n")
+    if state.global_code:
+        code += state.global_code + "\n\n"
 
     code += code_body
 

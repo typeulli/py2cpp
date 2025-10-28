@@ -1,17 +1,20 @@
-from typing import Generic, Protocol, SupportsIndex, TypeVar
+from typing import Generic, Protocol, SupportsIndex, TypeAlias, TypeVar, Optional, Type
 from typing import cast, Literal, Final
+from types import TracebackType
 
 T = TypeVar("T")
 N = TypeVar("N", bound=int)
 
+c_cast = cast
+c_static_cast = cast
+
 class c_void: ...
 void: Final[c_void] = c_void()
-
 class c_global:
     def __enter__(self) -> "c_global":
         return self
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        pass
+    def __exit__(self, _exc_type: Optional[Type[BaseException]], _exc_value: Optional[BaseException], _traceback: Optional[TracebackType]) -> None:
+        return None
 
 def c_struct(cls: type[T]) -> type[T]:
     return cls
@@ -174,7 +177,7 @@ class c_bool(Protocol):
     def __invert__(self) -> "c_bool": ...
 
 __all__ = [
-    "cast", "Literal", "Final",
+    "c_cast", "c_static_cast", "Literal", "Final",
     
     "c_void", "void",
     
