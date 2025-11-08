@@ -29,6 +29,7 @@ def get_time(func: Callable[P, T]) -> Callable[P, T]:
 path_here = Path(__file__).parent
 
 path_builtins = path_here / "builtins"
+path_header = path_here / "py2cpp_header.py"
 
 def _builtins_getIdx(last_idx: list[int] = [0]) -> int:
     v = last_idx[0]
@@ -70,8 +71,6 @@ List = Builtins("#include <vector>", inline=True)
 Str_Find = Builtins("str/find.cpp", requires=[String])
 CCtype = Builtins("#include <cctype>", inline=True)
 Algorithm = Builtins("#include <algorithm>", inline=True)
-Str_Upper = Builtins("str/upper.cpp", requires=[String, Algorithm, CCtype])
-Str_Lower = Builtins("str/lower.cpp", requires=[String, Algorithm, CCtype])
 CStdLib = Builtins("#include <cstdlib>", inline=True)
 Tuple = Builtins("#include <tuple>", inline=True)
 
@@ -84,6 +83,9 @@ NameDict: dict[str, tuple[Builtins, str]] = {
     "endl": (IOStream, "std::endl"),
     "getline": (IOStream, "std::getline"),
     "get": (Tuple, "std::get"),
+    "transform": (Algorithm, "std::transform"),
+    "toupper": (CCtype, "std::toupper"),
+    "tolower": (CCtype, "std::tolower"),
 }
 
 @dataclass
@@ -98,6 +100,7 @@ class State:
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
     used_tempids: set[str] = field(default_factory=lambda: set[str]())
     setting: Setting = field(default_factory=lambda: Setting(minimize_namespace=[]))
+
     def get_tempid(self) -> str:
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
         while True:
@@ -145,6 +148,26 @@ class ScriptTemplate:
 
         stmt_state.extra_codes.append(self.code.format(**tmp_vars, **kwargs, **names))
         return self.result_expr.format(**tmp_vars, **kwargs, **names)
+
+Template_String_Upper = ScriptTemplate(
+    code="""
+{__string} {tmp1} = {string};
+{__transform}({tmp1}.begin(), {tmp1}.end(), {tmp1}.begin(), {__toupper});
+""",
+    result_expr="{tmp1}",
+    require_tmps=["tmp1"],
+    require_names=["string", "transform", "toupper"]
+)
+
+Template_String_Lower = ScriptTemplate(
+    code="""
+{__string} {tmp1} = {string};
+{__transform}({tmp1}.begin(), {tmp1}.end(), {tmp1}.begin(), {__tolower});
+""",
+    result_expr="{tmp1}",
+    require_tmps=["tmp1"],
+    require_names=["string", "transform", "tolower"]
+)
 
 Template_Pop_NoIndex = ScriptTemplate(
     code="""
@@ -294,6 +317,46 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
                         assert type(type_str) == ast.Constant and type(type_str.value) == str
                         parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
                         return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
+                    case "c_short":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<16) - (1<<16) if val_int >= (1<<15) else val_int % (1<<16))
+                    case "c_ushort":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<16))
+                    case "c_int":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32))
+                    case "c_uint":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<32))
+                    case "c_long":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32)) + "L"
+                    case "c_ulong":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<32)) + "UL"
+                    case "c_longlong":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<64) - (1<<64) if val_int >= (1<<63) else val_int % (1<<64)) + "LL"
+                    case "c_ulonglong":
+                        assert len(node.args) == 1
+                        val_exp = assert_type(node.args[0], ast.Constant)
+                        val_int = assert_type(val_exp.value, int)
+                        return str(val_int % (1<<64)) + "ULL"
                     case "print":
                         keywords = node.keywords
 
@@ -334,11 +397,9 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
                             state.used_builtins.add(Str_Find)
                             return "py2c::str::find(" + __dfs_stmt(func.value) + ", " + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
                         case "upper":
-                            state.used_builtins.add(Str_Upper)
-                            return "py2c::str::upper(" + __dfs_stmt(func.value) + ")"
+                            return Template_String_Upper.format(stmt_state, string=__dfs_stmt(func.value))
                         case "lower":
-                            state.used_builtins.add(Str_Lower)
-                            return "py2c::str::lower(" + __dfs_stmt(func.value) + ")"
+                            return Template_String_Lower.format(stmt_state, string=__dfs_stmt(func.value))
                         case _:
                             raise NotImplementedError(f"Unsupported string method: {func.attr}")
 
@@ -639,9 +700,16 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
         case ast.Expr:
             assert type(node) == ast.Expr
-            val, extra = __dfs_stmt(node.value)
-            if extra != "": result += extra + "\n"
-            result += val + ";"
+            call_expr = node.value
+            if type(call_expr) == ast.Call and type(call_expr.func) == ast.Name and call_expr.func.id == "c_exitcode":
+                assert depth == 1, "c_exitcode can only be used in the main function"
+                val, extra = __dfs_stmt(call_expr.args[0])
+                if extra != "": result += extra + "\n"
+                result += "return " + val + ";"
+            else:
+                val, extra = __dfs_stmt(call_expr)
+                if extra != "": result += extra + "\n"
+                result += val + ";"
 
         case ast.If:
             assert type(node) == ast.If
@@ -795,11 +863,18 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             assert len(node.items) == 1, "Only single item 'with' statement is supported"
             ctx_expr = node.items[0].context_expr
             
-            if type(ctx_expr) == ast.Call and type(ctx_expr.func) == ast.Name and ctx_expr.func.id == "c_global":
-                for stmt in node.body:
-                    state.global_code += dfs(stmt, type_ctx, state, depth, path) + "\n"
+            if type(ctx_expr) == ast.Call and type(ctx_expr.func) == ast.Name:
+                match ctx_expr.func.id:
+                    case "c_global":
+                        for stmt in node.body:
+                            state.global_code += dfs(stmt, type_ctx, state, depth, path) + "\n"
+                    case "c_skip":
+                        pass
+                    case _:
+                        raise NotImplementedError(f"Unsupported 'with' context: {ctx_expr.func.id}")
+
             else:
-                raise NotImplementedError("Only 'with c_global()' statement is supported")
+                raise NotImplementedError(f"Unsupported 'with' context: {ast.dump(ctx_expr)}")
 
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
@@ -809,7 +884,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> str:
 
     _parse_types = get_time(parse_types) if verbose else parse_types
-    type_ctx = _parse_types(text, str(path_here))
+    type_ctx = _parse_types(text, [str(path_header)])
 
     tree = ast.parse(text, filename=path)
 
@@ -822,15 +897,21 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
     for b in state.used_builtins:
         code += b.toString(include_set)
 
-    code += "\n"
+    if include_set:
+        code += "\n"
 
+
+
+    __is_used_builtin: Callable[[str], bool] = lambda name: NameDict[name][0] in state.used_builtins
     for name in state.setting.minimize_namespace:
         builtin, full_name = NameDict[name]
         if builtin in state.used_builtins:
             code += f"using {full_name};\n"
 
-    if not code.endswith("\n\n"):
+    if any(map(__is_used_builtin, state.setting.minimize_namespace)) and not code.endswith("\n\n"):
         code += "\n"
+
+
 
     for struct in type_ctx.struct_dict.values():
         code += "struct " + struct.name + " {\n"

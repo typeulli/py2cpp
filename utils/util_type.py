@@ -247,7 +247,7 @@ class TypeContext:
             current_type = field_data.type_
         return current_type
 
-def parse_types(text: str, path_scripts: str) -> TypeContext:
+def parse_types(text: str, path_scripts: list[str]) -> TypeContext:
 
     tree = ast.parse(text)
 
@@ -265,8 +265,9 @@ def parse_types(text: str, path_scripts: str) -> TypeContext:
         tmp_path = f.name
 
     import os
-    os.environ["MYPYPATH"] = path_scripts
+    os.environ["MYPYPATH"] = os.pathsep.join(path_scripts)
     result = api.run([tmp_path, "--strict", "--show-error-codes", "--no-error-summary"])
+    os.remove(tmp_path)
 
 
     type_dict: dict[str, TypeData] = {
