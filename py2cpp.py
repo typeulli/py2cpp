@@ -1,5 +1,6 @@
 import ast
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -126,15 +127,23 @@ class StmtState:
         return "\n".join(self.extra_codes)
 
 @dataclass
+class ScriptTemplateAssign:
+    type: str
+    name: str
+    expr: str
+
+@dataclass
 class ScriptTemplate:
     code: str
     result_expr: str
-    require_tmps: list[str] = field(default_factory=lambda: [])
     require_vars: list[str] = field(default_factory=lambda: [])
+    require_tmps: list[str] = field(default_factory=lambda: [])
     require_names: list[str] = field(default_factory=lambda: [])
 
     def __post_init__(self):
         self.code = self.code.lstrip("\n").rstrip("\n")
+        self.require_tmps = re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.code) + re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
+        self.require_names = re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.code) + re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
 
     def format(self, stmt_state: StmtState, **kwargs: str) -> str:
         state = stmt_state.state
@@ -151,63 +160,56 @@ class ScriptTemplate:
 
 Template_String_Upper = ScriptTemplate(
     code="""
-{__string} {tmp1} = {string};
-{__transform}({tmp1}.begin(), {tmp1}.end(), {tmp1}.begin(), {__toupper});
+{__string} {_tmp1} = {string};
+{__transform}({_tmp1}.begin(), {_tmp1}.end(), {_tmp1}.begin(), {__toupper});
 """,
-    result_expr="{tmp1}",
-    require_tmps=["tmp1"],
-    require_names=["string", "transform", "toupper"]
+    result_expr="{_tmp1}"
 )
 
 Template_String_Lower = ScriptTemplate(
     code="""
-{__string} {tmp1} = {string};
-{__transform}({tmp1}.begin(), {tmp1}.end(), {tmp1}.begin(), {__tolower});
+{__string} {_tmp1} = {string};
+{__transform}({_tmp1}.begin(), {_tmp1}.end(), {_tmp1}.begin(), {__tolower});
 """,
-    result_expr="{tmp1}",
-    require_tmps=["tmp1"],
-    require_names=["string", "transform", "tolower"]
+    result_expr="{_tmp1}"
 )
 
 Template_Pop_NoIndex = ScriptTemplate(
     code="""
-auto {tmp1} = {list};
-auto {tmp2} = {tmp1}.back();
-{tmp1}.pop_back();
+auto {_tmp1} = {list};
+auto {_tmp2} = {_tmp1}.back();
+{_tmp1}.pop_back();
 """,
-    result_expr="{tmp2}",
-    require_tmps=["tmp1", "tmp2"], require_vars=["list"]
+    result_expr="{_tmp2}",
+    require_vars=["list"]
 )
 
 Template_Pop_WithIndex = ScriptTemplate(
     code="""
-auto {tmp1} = {list};
-auto {tmp2} = {tmp1}[{index}];
-{tmp1}.erase({tmp1}.begin() + {index});
+auto {_tmp1} = {list};
+auto {_tmp2} = {_tmp1}[{index}];
+{_tmp1}.erase({_tmp1}.begin() + {index});
 """,
-    result_expr="{tmp2}",
-    require_tmps=["tmp1", "tmp2"], require_vars=["list", "index"]
+    result_expr="{_tmp2}",
+    require_vars=["list", "index"]
 )
 
 Template_Input_NoPrompt = ScriptTemplate(
     code="""
-{__string} {tmp1};
-{__getline}({__cin}, {tmp1});
+{__string} {_tmp1};
+{__getline}({__cin}, {_tmp1});
 """,
-    result_expr="{tmp1}",
-    require_tmps=["tmp1"],
-    require_names=["cin", "string", "getline"]
+    result_expr="{_tmp1}"
 )
 
 Template_Input_WithPrompt = ScriptTemplate(
     code="""
 {__cout} << {prompt};
-{__string} {tmp1};
-{__getline}({__cin}, {tmp1});
+{__string} {_tmp1};
+{__getline}({__cin}, {_tmp1});
 """,
-    result_expr="{tmp1}",
-    require_vars=["prompt"], require_tmps=["tmp1"],
-    require_names=["cout", "cin", "string", "getline"]
+    result_expr="{_tmp1}",
+    require_vars=["prompt"]
 )
 
 def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "") -> TypeData:
