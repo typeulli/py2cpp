@@ -5,7 +5,8 @@ import threading
 import time
 import traceback
 from typing import Any
-from fastapi import FastAPI, APIRouter, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from py2cpp import Setting, py_2_cpp, NameDict
@@ -20,27 +21,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-router = APIRouter(prefix="/api/py2cpp")
-
+@app.get("/env/py2cpp_header.py")
+async def get_header():
+    return FileResponse("py2cpp_header.py")
 
 _DATA_NAMES = {"namespaces": list(NameDict.keys())}
-@router.get("/env/namespaces")
+@app.get("/env/namespaces")
 async def get_env_names():
     return _DATA_NAMES
 
 class ConvertRequest(BaseModel):
     code: str
+    filename: str = "<string>"
     namespaces: list[str] = []
 
-@router.post("/convert")
+def pad_comment(text: str):
+    lines = text.splitlines()
+    if not lines:
+        return "//"
+    padded_lines = ["// " + lines[0]]
+    for line in lines[1:]:
+        padded_lines.append("// " + line)
+    return "\n".join(padded_lines)
+
+@app.post("/convert")
 async def convert_code(request: ConvertRequest):
     try:
         setting = Setting(minimize_namespace=request.namespaces)
-        cpp_code = py_2_cpp(request.code, setting=setting)
+        cpp_code = py_2_cpp(request.code, request.filename, setting=setting)
         return {"state": "success", "result": cpp_code}
+    except SyntaxError as e:
+        message = "".join(traceback.format_exception_only(SyntaxError, e)).strip()
+        return {"state": "error", "message": pad_comment(message)}
     except Exception as e:
         traceback.print_exc()
-        return {"state": "error", "message": str(e)}
+        return {"state": "error", "message": pad_comment(f"{e.__class__.__name__}: {e!s}")}
 
 
 class PyrightSession:
@@ -140,7 +155,7 @@ class PyrightSession:
 
 sessions: dict[str, PyrightSession] = {}
 
-@router.websocket("/ws/{doc_id}")
+@app.websocket("/ws/{doc_id}")
 async def websocket_endpoint(ws: WebSocket, doc_id: str):
     await ws.accept()
     uri = f"file:///{doc_id}.py"
@@ -156,12 +171,12 @@ async def websocket_endpoint(ws: WebSocket, doc_id: str):
             elif data["type"] == "complete":
                 res = await session.get_completion(data["line"], data["character"])
                 await ws.send_json(res)
-    except Exception as _:
-        await ws.close()
+    except WebSocketDisconnect: pass
+    except Exception as e:      print(f"Unexpected error: {e}")
+    finally:
         session.proc.terminate()
         sessions.pop(doc_id, None)
 
-app.include_router(router)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api:app", host="0.0.0.0", port=7001, reload=True)
