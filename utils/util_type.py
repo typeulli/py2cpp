@@ -8,10 +8,10 @@ from mypy import api
 
 GenericData: TypeAlias = "list[TypeData | GenericData]"
 
-@dataclass
 class TypeData:
-    type_: str
-    generics: GenericData
+    def __init__(self, type_: str, generics: "GenericData | None" = None):
+        self.type_ = type_
+        self.generics = generics if generics is not None else []
     
     @classmethod
     def from_str(cls, type_str: str) -> "TypeData":
@@ -275,7 +275,8 @@ def parse_types(text: str, path_scripts: list[str]) -> TypeContext:
             args=[
                 ("prompt", TypeData(type_="builtins.str", generics=[]))
             ], 
-            return_type=TypeData(type_="builtins.str", generics=[])),
+            return_type=TypeData(type_="builtins.str", generics=[])
+        ),
     }
     
     for struct in transformer.revealed_structs:

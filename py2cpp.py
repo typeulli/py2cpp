@@ -76,6 +76,7 @@ Algorithm = Builtins("#include <algorithm>", inline=True)
 CStdLib = Builtins("#include <cstdlib>", inline=True)
 Tuple = Builtins("#include <tuple>", inline=True)
 CMath = Builtins("#include <cmath>", inline=True)
+Complex = Builtins("#include <complex>", inline=True)
 
 NameDict: dict[str, tuple[Builtins, str]] = {
     "string": (String, "std::string"),
@@ -91,11 +92,20 @@ NameDict: dict[str, tuple[Builtins, str]] = {
     "tolower": (CCtype, "std::tolower"),
     "flush": (IOStream, "std::flush"),
     "pow": (CMath, "std::pow"),
+    "complex": (Complex, "std::complex"),
 }
 
 @dataclass
+class DefaultTypesSetting:
+    int_type: str = "long"
+    float_type: str = "double"
+    bool_type: str = "bool"
+
+@dataclass
 class Setting:
-    minimize_namespace: list[str]
+    indent: str = "    "
+    minimize_namespace: list[str] = field(default_factory=lambda: [])
+    default_types: DefaultTypesSetting = field(default_factory=DefaultTypesSetting)
 
 @dataclass
 class State:
@@ -104,7 +114,7 @@ class State:
     defined: dict[str, bool] = field(default_factory=lambda: dict[str, bool]())
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
     used_tempids: set[str] = field(default_factory=lambda: set[str]())
-    setting: Setting = field(default_factory=lambda: Setting(minimize_namespace=[]))
+    setting: Setting = field(default_factory=Setting)
 
     def get_tempid(self) -> str:
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
@@ -244,15 +254,17 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
         case ast.Constant:
             assert type(expr) == ast.Constant
             if type(expr.value) == int:
-                return TypeData(type_="builtins.int", generics=[])
+                return TypeData(type_="builtins.int")
             if type(expr.value) == float:
-                return TypeData(type_="builtins.float", generics=[])
+                return TypeData(type_="builtins.float")
             if type(expr.value) == str:
-                return TypeData(type_="builtins.str", generics=[])
+                return TypeData(type_="builtins.str")
             if type(expr.value) == bool:
-                return TypeData(type_="builtins.bool", generics=[])
+                return TypeData(type_="builtins.bool")
+            if type(expr.value) == complex:
+                return TypeData(type_="builtins.complex")
         case ast.Compare | ast.BoolOp:
-            return TypeData(type_="builtins.bool", generics=[])
+            return TypeData(type_="builtins.bool")
         case ast.BinOp:
             assert type(expr) == ast.BinOp
             left_type = eval_type(expr.left, type_ctx, state, path)
@@ -260,8 +272,18 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
             if left_type.type_ == right_type.type_:
                 return left_type
             if left_type.type_ == "builtins.float" or right_type.type_ == "builtins.float":
-                return TypeData(type_="builtins.float", generics=[])
-            return TypeData(type_="builtins.int", generics=[])
+                return TypeData(type_="builtins.float")
+            return TypeData(type_="builtins.int")
+        case ast.Attribute:
+            assert type(expr) == ast.Attribute
+            value_type = eval_type(expr.value, type_ctx, state, path)
+            if value_type.type_.split(".")[-1] in type_ctx.struct_dict:
+                struct_def = type_ctx.struct_dict[value_type.type_.split(".")[-1]]
+                if expr.attr in struct_def.fields:
+                    return struct_def.fields[expr.attr].type_
+                raise TypeError(f"Attribute '{expr.attr}' not found in struct '{value_type.type_}'")
+            base_type = eval_type(expr.value, type_ctx, state, path)
+            raise TypeError(f"Unsupported at eval_type: attr for '{base_type.type_}'")
         case _:
             raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
     raise RuntimeError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
@@ -282,6 +304,7 @@ type_alias = {
     "builtins.int": "long",
     "builtins.float": "double",
     "builtins.bool": "bool",
+    "builtins.complex": "std::complex<double>",
 }
 
 for _key, _value in type_alias.copy().items():
@@ -295,6 +318,8 @@ def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
         return state.get_name("string")
 
     if data.type_ in type_alias:
+        if data.type_ == "builtins.complex":
+            return state.get_name("complex") + "<double>"
         return type_alias[data.type_]
 
     if data.type_.startswith("builtins.list"):
@@ -334,10 +359,15 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
                 return "true" if node.value else "false"
             if type(node.value) == str:
                 return "\"" + node.value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t").replace("\b", "\\b").replace("\f", "\\f") + "\""
+            if type(node.value) == complex:
+                return state.get_name("complex") + "<double>(" + str(node.value.real) + ", " + str(node.value.imag) + ")"
             return state.origin_code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
 
         case ast.Attribute:
             assert type(node) == ast.Attribute
+            if eval_type(node.value, type_ctx, state, path).type_ == "builtins.complex":
+                if node.attr in ("real", "imag"):
+                    return __dfs_stmt(node.value) + "." + node.attr + "()"
             return __dfs_stmt(node.value) + "." + node.attr
 
         case ast.List:
@@ -526,6 +556,18 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
 
         case ast.BinOp:
             assert type(node) == ast.BinOp
+            if type(node.op) in (ast.Add, ast.Sub):
+                try:
+                    left_type = eval_type(node.left, type_ctx, state, path)
+                    right_type = eval_type(node.right, type_ctx, state, path)
+                    if left_type.type_ == "builtins.float" and type(node.right) == ast.Constant and isinstance(node.right.value, complex):
+                        assert node.right.value.real == 0.0
+                        return state.get_name("complex") + "<double>(" + __dfs_stmt(node.left) + (", " if type(node.op) == ast.Add else " - ") + str(abs(node.right.value.imag)) + ")"
+                    if right_type.type_ == "builtins.float" and type(node.left) == ast.Constant and isinstance(node.left.value, complex):
+                        assert node.left.value.real == 0.0
+                        return state.get_name("complex") + "<double>(" + (str(abs(node.left.value.imag)) + ", " if type(node.op) == ast.Add else "-" + str(abs(node.left.value.imag)) + ", ") + __dfs_stmt(node.right) + ")"
+                except NotImplementedError:
+                    pass
             if type(node.op) == ast.Pow:
                 return state.get_name("pow") + "(" + __dfs_stmt(node.left) + ", " + __dfs_stmt(node.right) + ")"
             
@@ -591,7 +633,7 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
             orelse_str = __dfs_stmt(node.orelse)
             if ":" in orelse_str:
                 orelse_str = "(" + orelse_str + ")"
-            return test_str + " ? " + body_str + " : " + orelse_str
+            return f"({test_str} ? {body_str} : {orelse_str})"
 
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
@@ -600,6 +642,8 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
 
 def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
 
+    def __pad(code: str) -> str:
+        return pad(code, state.setting.indent)
     def __dfs(node: ast.AST) -> str:
         return dfs(node, type_ctx, state, depth + 1, path)
     def __dfs_stmt(node: ast.AST, *, direct: DirectData = DirectData()) -> tuple[str, str]:
@@ -627,8 +671,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
         for child in children_main:
             code = __dfs(child)
             if code != "":
-                result += pad(code) + "\n"
-        result += "    return 0;\n}\n"
+                result += __pad(code) + "\n"
+        result += state.setting.indent + "return 0;\n}\n"
         return result.strip("\n")
 
     match type(node):
@@ -806,7 +850,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
             result += "if (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
-                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
+                result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
             if len(node.orelse) > 0:
                 if len(node.orelse) == 1 and type(node.orelse[0]) == ast.If:
@@ -814,7 +858,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 else:
                     result += " else {\n"
                     for stmt in node.orelse:
-                        result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
+                        result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
                     result += "}"
 
         case ast.For:
@@ -869,7 +913,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             else:
                 raise NotImplementedError("Only simple variable as for loop target is supported")
             for stmt in body:
-                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
+                result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
 
         case ast.While:
@@ -880,7 +924,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
             result += "while (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
-                result += pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
+                result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
 
         case ast.FunctionDef:
@@ -900,7 +944,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             for stmt in node.body:
                 newline = dfs(stmt, type_ctx, state, depth + 1, path + node.name + "#")
                 if newline != "":
-                    result += pad(newline) + "\n"
+                    result += __pad(newline) + "\n"
             result += "}\n"
 
         case ast.Return:
@@ -977,7 +1021,7 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
 
     tree = ast.parse(text, filename=path)
 
-    state = State(origin_code=text, setting=setting or Setting(minimize_namespace=[]))
+    state = State(origin_code=text, setting=setting or Setting())
     code = ""
     _dfs = get_time(dfs) if verbose else dfs
     code_body = _dfs(tree, type_ctx, state=state)

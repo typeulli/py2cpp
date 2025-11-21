@@ -1,6 +1,6 @@
 
-def pad(text: str, n: int = 1) -> str:
-    return "    " * n + text.replace("\n", "\n" + "    " * n)
+def pad(text: str, indent: str = "    ", *, n: int = 1) -> str:
+    return indent * n + text.replace("\n", "\n" + indent * n)
 
 def unwrap_paren(s: str) -> str:
     s = s.strip()
