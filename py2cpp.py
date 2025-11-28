@@ -15,6 +15,7 @@ import click
 from utils.util_string import pad, unwrap_paren
 from utils.util_type import FunctionTypeData, parse_types, TypeContext, TypeData
 from utils.util_code import assert_type
+from utils.util_parse import CommentInfo, parse_comments
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -108,8 +109,35 @@ class Setting:
     default_types: DefaultTypesSetting = field(default_factory=DefaultTypesSetting)
 
 @dataclass
+class Code:
+    code: str
+    comments: list[CommentInfo] = field(init=False)
+    def __post_init__(self):
+        self.comments = parse_comments(self.code)
+    def popComments(self, expr: ast.stmt) -> tuple[list[CommentInfo], CommentInfo | None]:
+        result: list[CommentInfo] = []
+        remaining_comments: list[CommentInfo] = []
+        for comment in self.comments:
+            if comment.end_lineno < expr.lineno:
+                result.append(comment)
+            else:
+                remaining_comments.append(comment)
+        self.comments = remaining_comments
+        remaining_comments = []
+        
+        sameline_comments: CommentInfo | None = None
+        for comment in self.comments:
+            if comment.lineno == expr.lineno:
+                sameline_comments = comment
+            else:
+                remaining_comments.append(comment)
+        self.comments = remaining_comments
+        
+        return result, sameline_comments
+
+@dataclass
 class State:
-    origin_code: str
+    origin_code: Code
     global_code: str = ""
     defined: dict[str, bool] = field(default_factory=lambda: dict[str, bool]())
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
@@ -345,13 +373,13 @@ class DirectData:
     type_: Literal["none", "assign"] = "none"
     value: str = ""
 
-def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: str = "", *, direct: DirectData = DirectData()) -> str:
+def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path: str = "", *, direct: DirectData = DirectData()) -> str:
 
     state = stmt_state.state
 
-    def __dfs_stmt(node: ast.AST) -> str:
+    def __dfs_stmt(node: ast.expr) -> str:
         return dfs_stmt(node, type_ctx, stmt_state, path)
-
+    
     match type(node):
         case ast.Constant:
             assert type(node) == ast.Constant
@@ -361,7 +389,7 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
                 return "\"" + node.value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t").replace("\b", "\\b").replace("\f", "\\f") + "\""
             if type(node.value) == complex:
                 return state.get_name("complex") + "<double>(" + str(node.value.real) + ", " + str(node.value.imag) + ")"
-            return state.origin_code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
+            return state.origin_code.code.splitlines()[node.lineno - 1][node.col_offset:node.end_col_offset]
 
         case ast.Attribute:
             assert type(node) == ast.Attribute
@@ -640,13 +668,13 @@ def dfs_stmt(node: ast.AST, type_ctx: TypeContext, stmt_state: StmtState, path: 
 
     raise RuntimeError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
-def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
+def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
 
     def __pad(code: str) -> str:
         return pad(code, state.setting.indent)
-    def __dfs(node: ast.AST) -> str:
+    def __dfs(node: ast.stmt) -> str:
         return dfs(node, type_ctx, state, depth + 1, path)
-    def __dfs_stmt(node: ast.AST, *, direct: DirectData = DirectData()) -> tuple[str, str]:
+    def __dfs_stmt(node: ast.expr, *, direct: DirectData = DirectData()) -> tuple[str, str]:
         stmt_state = StmtState(state)
         _val = dfs_stmt(node, type_ctx, stmt_state, path, direct=direct)
         return _val, stmt_state.collect_extra_codes
@@ -655,7 +683,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
     result: str = ""
 
-    if depth == 0:
+    if depth == 0 or type(node) == ast.Module:
         children: list[ast.AST] = list(ast.iter_child_nodes(node))
         children_preload: list[ast.FunctionDef] = []
         children_main: list[ast.AST] = []
@@ -669,17 +697,26 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
             result += __dfs(child) + "\n"
         result += "int main() {\n"
         for child in children_main:
+            assert isinstance(child, ast.stmt)
             code = __dfs(child)
             if code != "":
                 result += __pad(code) + "\n"
         result += state.setting.indent + "return 0;\n}\n"
         return result.strip("\n")
 
+    assert isinstance(node, ast.stmt)
+    
+    comments_prev, comments_now = state.origin_code.popComments(node)
+    comments_now_code = (" //" + comments_now.text) if comments_now is not None else ""
+    
+    result += "".join("//"+comment.text+"\n" for comment in comments_prev).lstrip("\n")
+    
+
     match type(node):
         
         case ast.Pass:
             assert type(node) == ast.Pass
-            return ""
+            return comments_now_code
         
         case ast.Assign:
             assert type(node) == ast.Assign
@@ -723,7 +760,7 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
 
                 val, extra = __dfs_stmt(node.value, direct=DirectData(type_="assign", value=target_str))
                 
-                if val == "": return extra
+                if val == "": return extra + comments_now_code
                 if extra != "": result += extra + "\n"
 
                 loc = path + target_str
@@ -755,6 +792,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                     if loc not in state.defined:
                         result += __parse_type(type_ctx.get_vartype(loc)) + " " + target_id + ";"
                         state.defined[loc] = True
+
+            result += comments_now_code
 
         case ast.AnnAssign:
             assert type(node) == ast.AnnAssign
@@ -795,6 +834,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                         result += f"{const_str}{type_} {target.id} = {val};"
                     state.defined[loc] = True
 
+            result += comments_now_code
+
         case ast.AugAssign:
             assert type(node) == ast.AugAssign
 
@@ -828,6 +869,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                     result += "--" + target.id + ";"
                 else:
                     result += target.id + " " + op + " " + val + ";"
+
+            result += comments_now_code
                 
 
         case ast.Expr:
@@ -842,6 +885,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 val, extra = __dfs_stmt(call_expr)
                 if extra != "": result += extra + "\n"
                 result += val + ";"
+
+            result += comments_now_code
 
         case ast.If:
             assert type(node) == ast.If
@@ -958,6 +1003,8 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 if extra != "": result += extra + "\n"
                 result += "return " + unwrap_paren(val) + ";"
 
+            result += comments_now_code
+
         case ast.ClassDef:
             assert type(node) == ast.ClassDef
 
@@ -980,10 +1027,10 @@ def dfs(node: ast.AST, type_ctx: TypeContext, state: State, depth: int = 0, path
                 pass
 
         case ast.Continue:
-            result += "continue;"
+            result += "continue;" + comments_now_code
 
         case ast.Break:
-            result += "break;"
+            result += "break;" + comments_now_code
 
         case ast.Global:
             assert type(node) == ast.Global
@@ -1021,7 +1068,7 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
 
     tree = ast.parse(text, filename=path)
 
-    state = State(origin_code=text, setting=setting or Setting())
+    state = State(origin_code=Code(text), setting=setting or Setting())
     code = ""
     _dfs = get_time(dfs) if verbose else dfs
     code_body = _dfs(tree, type_ctx, state=state)
@@ -1101,13 +1148,19 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
 @click.option('-i', '--input', 'input_path', required=True, type=click.Path(exists=True), help='Path to the input Python file.')
 @click.option('-o', '--output', 'output_path', required=False, type=click.Path(), help='Path to the output executable file.')
 @click.option('-c', '--compile', 'compile_target', required=False, type=click.Choice(['cpp', 'exe']), default='cpp', help='Target compilation format.')
-def cli(input_path: str, output_path: str | None, compile_target: str):
+@click.option('-p', '--print', 'print_code', is_flag=True, help='Print the generated C++ code to stdout instead of writing to a file (only for cpp target).')
+def cli(input_path: str, output_path: str | None, compile_target: str, print_code: bool):
     setting = Setting(minimize_namespace=["string", "vector", "cout", "cin", "endl", "get"])
 
     input_path_obj = Path(input_path)
+    python_code = input_path_obj.read_text(encoding="utf-8")
+    
+    if print_code:
+        print(py_2_cpp(python_code, path=str(input_path_obj), setting=setting))
+        return
+    
     output_path_obj = Path(output_path) if output_path else input_path_obj.with_suffix("." + compile_target)
 
-    python_code = input_path_obj.read_text(encoding="utf-8")
 
     match compile_target or "cpp":
         case 'cpp':
