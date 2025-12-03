@@ -112,8 +112,10 @@ class Setting:
 class Code:
     code: str
     comments: list[CommentInfo] = field(init=False)
+
     def __post_init__(self):
         self.comments = parse_comments(self.code)
+
     def popComments(self, expr: ast.stmt) -> tuple[list[CommentInfo], CommentInfo | None]:
         result: list[CommentInfo] = []
         remaining_comments: list[CommentInfo] = []
@@ -425,46 +427,19 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                         assert type(type_str) == ast.Constant and type(type_str.value) == str
                         parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
                         return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
-                    case "c_short":
-                        if len(node.args) != 1: raise SyntaxError("c_short requires exactly one argument")
+                    case "c_short" | "c_ushort" | "c_int" | "c_uint" | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong":
+                        if len(node.args) != 1: raise SyntaxError(f"{func.id} requires exactly one argument")
                         val_exp = assert_type(node.args[0], ast.Constant)
                         val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<16) - (1<<16) if val_int >= (1<<15) else val_int % (1<<16))
-                    case "c_ushort":
-                        if len(node.args) != 1: raise SyntaxError("c_ushort requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<16))
-                    case "c_int":
-                        if len(node.args) != 1: raise SyntaxError("c_int requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32))
-                    case "c_uint":
-                        if len(node.args) != 1: raise SyntaxError("c_uint requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<32))
-                    case "c_long":
-                        if len(node.args) != 1: raise SyntaxError("c_long requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32)) + "L"
-                    case "c_ulong":
-                        if len(node.args) != 1: raise SyntaxError("c_ulong requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<32)) + "UL"
-                    case "c_longlong":
-                        if len(node.args) != 1: raise SyntaxError("c_longlong requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<64) - (1<<64) if val_int >= (1<<63) else val_int % (1<<64)) + "LL"
-                    case "c_ulonglong":
-                        if len(node.args) != 1: raise SyntaxError("c_ulonglong requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        return str(val_int % (1<<64)) + "ULL"
+                        match func.id:
+                            case "c_short": return str(val_int % (1<<16) - (1<<16) if val_int >= (1<<15) else val_int % (1<<16))
+                            case "c_ushort": return str(val_int % (1<<16))
+                            case "c_int": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32))
+                            case "c_uint": return str(val_int % (1<<32))
+                            case "c_long": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32)) + "L"
+                            case "c_ulong": return str(val_int % (1<<32)) + "UL"
+                            case "c_longlong": return str(val_int % (1<<64) - (1<<64) if val_int >= (1<<63) else val_int % (1<<64)) + "LL"
+                            case "c_ulonglong": return str(val_int % (1<<64)) + "ULL"
                     case "print":
                         keywords = node.keywords
 
@@ -588,12 +563,12 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                 try:
                     left_type = eval_type(node.left, type_ctx, state, path)
                     right_type = eval_type(node.right, type_ctx, state, path)
-                    if left_type.type_ == "builtins.float" and type(node.right) == ast.Constant and isinstance(node.right.value, complex):
+                    if left_type.type_ in ("builtins.int", "builtins.float") and type(node.right) == ast.Constant and isinstance(node.right.value, complex):
                         assert node.right.value.real == 0.0
-                        return state.get_name("complex") + "<double>(" + __dfs_stmt(node.left) + (", " if type(node.op) == ast.Add else " - ") + str(abs(node.right.value.imag)) + ")"
-                    if right_type.type_ == "builtins.float" and type(node.left) == ast.Constant and isinstance(node.left.value, complex):
+                        return state.get_name("complex") + "<double>(" + __dfs_stmt(node.left) + ", " + ("" if type(node.op) == ast.Add else "-") + str(abs(node.right.value.imag)) + ")"
+                    if right_type.type_ in ("builtins.int", "builtins.float") and type(node.left) == ast.Constant and isinstance(node.left.value, complex):
                         assert node.left.value.real == 0.0
-                        return state.get_name("complex") + "<double>(" + (str(abs(node.left.value.imag)) + ", " if type(node.op) == ast.Add else "-" + str(abs(node.left.value.imag)) + ", ") + __dfs_stmt(node.right) + ")"
+                        return state.get_name("complex") + "<double>(" + (str(abs(node.left.value.imag)) + ", " + ("" if type(node.op) == ast.Add else "-") + str(abs(node.left.value.imag)) + ", ") + __dfs_stmt(node.right) + ")"
                 except NotImplementedError:
                     pass
             if type(node.op) == ast.Pow:
@@ -1145,9 +1120,9 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
     shutil.rmtree(path_temp)
 
 @click.command()
-@click.option('-i', '--input', 'input_path', required=True, type=click.Path(exists=True), help='Path to the input Python file.')
-@click.option('-o', '--output', 'output_path', required=False, type=click.Path(), help='Path to the output executable file.')
-@click.option('-c', '--compile', 'compile_target', required=False, type=click.Choice(['cpp', 'exe']), default='cpp', help='Target compilation format.')
+@click.argument('input_path', type=click.Path(exists=True))
+@click.option('-o', '--output', 'output_path', required=False, type=click.Path(), help='Path to the output executable/file.')
+@click.option('-c', '--compile', 'compile_target', required=False, type=click.Choice(['auto', 'cpp', 'exe']), default='auto', help='Target compilation format.')
 @click.option('-p', '--print', 'print_code', is_flag=True, help='Print the generated C++ code to stdout instead of writing to a file (only for cpp target).')
 def cli(input_path: str, output_path: str | None, compile_target: str, print_code: bool):
     setting = Setting(minimize_namespace=["string", "vector", "cout", "cin", "endl", "get"])
@@ -1161,6 +1136,11 @@ def cli(input_path: str, output_path: str | None, compile_target: str, print_cod
     
     output_path_obj = Path(output_path) if output_path else input_path_obj.with_suffix("." + compile_target)
 
+    if compile_target == "auto":
+        if output_path_obj.suffix == ".exe":
+            compile_target = "exe"
+        else:
+            compile_target = "cpp"
 
     match compile_target or "cpp":
         case 'cpp':
