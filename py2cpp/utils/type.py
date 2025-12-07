@@ -261,10 +261,12 @@ def parse_types(text: str, path_scripts: list[str] = []) -> TypeContext:
     new_tree = ast.parse(new_code)
     new_code_lines = new_code.splitlines()
     
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=True) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(new_code)
+        f.close()
         os.environ["MYPYPATH"] = os.pathsep.join(path_scripts)
         result = api.run([f.name, "--strict", "--show-error-codes", "--no-error-summary"])
+        os.unlink(f.name)
 
 
     type_dict: dict[str, TypeData] = {
