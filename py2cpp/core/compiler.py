@@ -1,33 +1,17 @@
-from abc import ABCMeta, abstractmethod
 import ast
 import random
 import re
 import shutil
 import tempfile
-import time
+from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass, field
-from functools import wraps
 from pathlib import Path
-from typing import Callable, Literal, ParamSpec, TypeVar
+from typing import Callable, Literal
 
-import click
+from py2cpp.utils.type import FunctionTypeData, parse_types, TypeContext, TypeData
+from py2cpp.utils.code import assert_type, get_time
+from py2cpp.utils.parse import pad, unwrap_paren, CommentInfo, parse_comments
 
-from utils.util_string import pad, unwrap_paren
-from utils.util_type import FunctionTypeData, parse_types, TypeContext, TypeData
-from utils.util_code import assert_type
-from utils.util_parse import CommentInfo, parse_comments
-
-P = ParamSpec("P")
-T = TypeVar("T")
-def get_time(func: Callable[P, T]) -> Callable[P, T]:
-    @wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        print(f"{func.__name__} execution time: {end_time - start_time} seconds")
-        return result
-    return wrapper
 
 path_here = Path(__file__).parent
 
@@ -68,6 +52,7 @@ class Builtins:
     def __hash__(self):
         return hash(self.idx)
 
+CStdDef = Builtins("#include <cstddef>", inline=True)
 IOStream = Builtins("#include <iostream>", inline=True)
 String = Builtins("#include <string>", inline=True)
 List = Builtins("#include <vector>", inline=True)
@@ -925,6 +910,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     if step == "1": exp_change = "++" + target.id
                     if step == "-1": exp_change = "--" + target.id
                     
+                    state.used_builtins.add(CStdDef)
                     result += "for (" + ("size_t " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + exp_change + ") {\n"
                 else:
                     val, extra = __dfs_stmt(iter)
@@ -1035,7 +1021,13 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
 
     return result
 
-def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> str:
+@dataclass
+class CppnizeResult:
+    code: str
+    type_ctx: TypeContext
+    state: State
+
+def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> CppnizeResult:
     compile(text, filename=path, mode='exec', flags=ast.PyCF_ONLY_AST, dont_inherit=True, optimize=-1)
 
     _parse_types = get_time(parse_types) if verbose else parse_types
@@ -1080,7 +1072,7 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
 
     code += code_body
 
-    return code
+    return CppnizeResult(code=code, type_ctx=type_ctx, state=state)
 
 def build_cpp_to_exe(cpp_code: str, output_path: str):
     import subprocess
@@ -1102,7 +1094,7 @@ def build_cpp_to_exe(cpp_code: str, output_path: str):
 def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: bool = False):
     path_target = Path(path)
 
-    code = py_2_cpp(text, path=path, verbose=verbose, setting=setting)
+    code = py_2_cpp(text, path=path, verbose=verbose, setting=setting).code
 
     path_temp = path_here / "temp"
     path_temp.mkdir(exist_ok=True)
@@ -1118,38 +1110,3 @@ def py_2_exe(text: str, path: str, *, setting: Setting | None = None, verbose: b
     (path_temp / (path_target.stem + ".exe")).rename(result_name)
 
     shutil.rmtree(path_temp)
-
-@click.command()
-@click.argument('input_path', type=click.Path(exists=True))
-@click.option('-o', '--output', 'output_path', required=False, type=click.Path(), help='Path to the output executable/file.')
-@click.option('-c', '--compile', 'compile_target', required=False, type=click.Choice(['auto', 'cpp', 'exe']), default='auto', help='Target compilation format.')
-@click.option('-p', '--print', 'print_code', is_flag=True, help='Print the generated C++ code to stdout instead of writing to a file (only for cpp target).')
-def cli(input_path: str, output_path: str | None, compile_target: str, print_code: bool):
-    setting = Setting(minimize_namespace=["string", "vector", "cout", "cin", "endl", "get"])
-
-    input_path_obj = Path(input_path)
-    python_code = input_path_obj.read_text(encoding="utf-8")
-    
-    if print_code:
-        print(py_2_cpp(python_code, path=str(input_path_obj), setting=setting))
-        return
-    
-    output_path_obj = Path(output_path) if output_path else input_path_obj.with_suffix("." + compile_target)
-
-    if compile_target == "auto":
-        if output_path_obj.suffix == ".exe":
-            compile_target = "exe"
-        else:
-            compile_target = "cpp"
-
-    match compile_target or "cpp":
-        case 'cpp':
-            cpp_code = py_2_cpp(python_code, path=str(input_path_obj), setting=setting)
-            output_path_obj.write_text(cpp_code, encoding="utf-8")
-        case 'exe':
-            py_2_exe(python_code, path=str(output_path_obj), verbose=True, setting=setting)
-        case _:
-            raise ValueError("Invalid compile target specified: " + str(compile_target))
-
-if __name__ == "__main__":
-    cli()

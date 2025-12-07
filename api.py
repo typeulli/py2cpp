@@ -9,7 +9,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from py2cpp import Setting, py_2_cpp, NameDict
+
+from py2cpp import py_2_cpp
+from py2cpp.core.compiler import Setting, NameDict
 
 app = FastAPI()
 
@@ -48,7 +50,7 @@ def pad_comment(text: str):
 async def convert_code(request: ConvertRequest):
     try:
         setting = Setting(minimize_namespace=request.namespaces)
-        cpp_code = py_2_cpp(request.code, request.filename, setting=setting)
+        cpp_code = py_2_cpp(request.code, request.filename, setting=setting).code
         return {"state": "success", "result": cpp_code}
     except SyntaxError as e:
         message = "".join(traceback.format_exception_only(SyntaxError, e)).strip()

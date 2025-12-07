@@ -2,7 +2,7 @@
 
 A Python-to-C++ translator that converts a restricted subset of Python into clean and readable C++ code.
 
-[Online Simulator](https:://typeulli.com/py2cpp)
+[Online Simulator](https://typeulli.com/py2cpp)
 
 ## Key Features
 
@@ -27,9 +27,7 @@ A Python-to-C++ translator that converts a restricted subset of Python into clea
 ## Installation
 
 ```bash
-git clone https://github.com/typeulli/py2cpp.git
-cd py2cpp
-pip install -r requirements.txt
+pip install py2cpp
 ```
 ## Usage
 ```bash
