@@ -1,8 +1,9 @@
 from typing import Optional, TypeAlias
 from dataclasses import dataclass
-import tempfile
-import re
 import ast
+import os
+import re
+import tempfile
 
 from mypy import api
 
@@ -247,7 +248,7 @@ class TypeContext:
             current_type = field_data.type_
         return current_type
 
-def parse_types(text: str, path_scripts: list[str]) -> TypeContext:
+def parse_types(text: str, path_scripts: list[str] = []) -> TypeContext:
 
     tree = ast.parse(text)
 
@@ -260,14 +261,10 @@ def parse_types(text: str, path_scripts: list[str]) -> TypeContext:
     new_tree = ast.parse(new_code)
     new_code_lines = new_code.splitlines()
     
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=True) as f:
         f.write(new_code)
-        tmp_path = f.name
-
-    import os
-    os.environ["MYPYPATH"] = os.pathsep.join(path_scripts)
-    result = api.run([tmp_path, "--strict", "--show-error-codes", "--no-error-summary"])
-    os.remove(tmp_path)
+        os.environ["MYPYPATH"] = os.pathsep.join(path_scripts)
+        result = api.run([f.name, "--strict", "--show-error-codes", "--no-error-summary"])
 
 
     type_dict: dict[str, TypeData] = {

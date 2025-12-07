@@ -16,7 +16,6 @@ from py2cpp.utils.parse import pad, unwrap_paren, CommentInfo, parse_comments
 path_here = Path(__file__).parent
 
 path_builtins = path_here / "builtins"
-path_header = path_here / "py2cpp_header.py"
 
 def _builtins_getIdx(last_idx: list[int] = [0]) -> int:
     v = last_idx[0]
@@ -1031,7 +1030,7 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
     compile(text, filename=path, mode='exec', flags=ast.PyCF_ONLY_AST, dont_inherit=True, optimize=-1)
 
     _parse_types = get_time(parse_types) if verbose else parse_types
-    type_ctx = _parse_types(text, [str(path_header)])
+    type_ctx = _parse_types(text)
 
     tree = ast.parse(text, filename=path)
 

@@ -2,4 +2,6 @@ from . import code
 from . import type
 from . import parse
 
-__all__ = ["code", "type", "parse"]
+from . import header
+
+__all__ = ["code", "type", "parse", "header"]
