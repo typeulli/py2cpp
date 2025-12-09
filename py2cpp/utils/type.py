@@ -313,6 +313,7 @@ def parse_types(text: str, path_scripts: list[str] = []) -> TypeContext:
                                         s += _name + "#"
                                 key = s + var_name
                             break
+
                 assert type_str != "Any", f"Type of {key} is Any"
                 type_dict[key] = TypeData.from_str(type_str)
     

@@ -23,9 +23,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/env/py2cpp_header.py")
+@app.get("/robots.txt")
+async def robots_txt():
+    return """User-agent: *
+Allow: /"""
+
+@app.get("/env/header.py")
 async def get_header():
-    return FileResponse("py2cpp_header.py")
+    return FileResponse("py2cpp/utils/header.py")
 
 _DATA_NAMES = {"namespaces": list(NameDict.keys())}
 @app.get("/env/namespaces")

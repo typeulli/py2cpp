@@ -976,15 +976,14 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
 
         case ast.Import:
             assert type(node) == ast.Import
-            if len(node.names) == 1 and node.names[0].name in ("sys", "py2cpp_header"):
+            if node.names and node.names[0].name.split(".")[0] in ("sys", "py2cpp"):
                 pass
             else:
-                raise NotImplementedError("Only 'import py2cpp_header' is supported")
+                raise NotImplementedError("Only sys and py2cpp are supported")
 
         case ast.ImportFrom:
             assert type(node) == ast.ImportFrom
-            if node.module == "py2cpp_header":
-                pass
+            pass
 
         case ast.Continue:
             result += "continue;" + comments_now_code

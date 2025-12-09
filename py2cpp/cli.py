@@ -24,8 +24,10 @@ def main(input_path: str, output_path: str | None, compile_target: str, print_co
     if compile_target == "auto":
         if output_path_obj.suffix == ".exe":
             compile_target = "exe"
+            output_path_obj = output_path_obj.with_suffix(".exe")
         else:
             compile_target = "cpp"
+            output_path_obj = output_path_obj.with_suffix(".cpp")
 
     match compile_target or "cpp":
         case 'cpp':

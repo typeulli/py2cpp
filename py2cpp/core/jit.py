@@ -1,5 +1,4 @@
-
-from ctypes import wintypes, windll, CDLL
+from ctypes import wintypes, CDLL
 import ctypes
 import hashlib
 import inspect
@@ -19,6 +18,23 @@ PATH_COMPILER = "g++"
 PATH_CACHE = get_cache_dir() / "jit"
 P = ParamSpec("P")
 T = TypeVar("T")
+
+DELSPEC = "__declspec(dllexport)" if system_name == "windows" else "__attribute__((visibility(\"default\")))"
+
+FLAGS = {
+    "windows": ["-shared", "-static", "-static-libgcc", "-static-libstdc++"],
+    "linux": ["-shared"],
+    "darwin": ["-dynamiclib"]
+}
+
+def get_extension(system_name: str) -> str:
+    match system_name:
+        case "windows":
+            return "dll"
+        case "darwin":
+            return "dylib"
+        case _:
+            return "so"
 
 class JitFunction(Generic[P, T]):
     
@@ -41,13 +57,18 @@ class JitFunction(Generic[P, T]):
         wraps(func)(self)
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
-        return self.cfunc(*args)
+        return self.cfunc(*args, **kwargs)
 
     def unload(self):
-        if system_name == "windows":
-            if hasattr(self, "handle"):
-                windll.kernel32.FreeLibrary(wintypes.HMODULE(self.handle))
-                del self.handle
+        match system_name:
+            case "windows":
+                if hasattr(self, "handle"):
+                    ctypes.windll.kernel32.FreeLibrary(wintypes.HMODULE(self.handle))
+                    del self.handle
+            case _:
+                if hasattr(self, "handle"):
+                    ctypes.cdll.LoadLibrary(self.path).dlclose(self.handle)
+                    del self.handle
 
     def __del__(self):
         try:
@@ -87,27 +108,20 @@ def jit(func: Callable[P, T] | None = None, *, cxx: int = 17, o: int = 3) -> Cal
                 fn_code += ", "
         fn_code += ")"
         assert fn_code in cpp_code
-        cpp_code = cpp_code.replace(fn_code, "extern \"C\" __declspec(dllexport) " + fn_code)
+        cpp_code = cpp_code.replace(fn_code, f"extern \"C\" {DELSPEC} {fn_code}", 1)
         cpp_code = cpp_code[:cpp_code.rindex("int main()")].strip()
 
 
         executing_path = Path(inspect.getfile(func))
         pycache_path = executing_path.parent / "__pycache__"
-        output = pycache_path / (executing_path.stem + f".{func.__name__}." + {
-            "windows": "dll",
-            "darwin": "dylib",
-            "linux": "so",
-        }.get(system_name, "so"))
+        output = pycache_path / (executing_path.stem + f".{func.__name__}." + get_extension(system_name))
         pycache_path.mkdir(exist_ok=True, parents=True)
         cpp_path = pycache_path / (executing_path.stem + f".{func.__name__}.cpp")
         cpp_path.write_text(cpp_code, encoding="utf-8")
         call: list[str] = [
             PATH_COMPILER,
             f"-std=c++{cxx}",
-            "-shared",
-            "-static",
-            "-static-libgcc",
-            "-static-libstdc++",
+            *FLAGS.get(system_name, []),
             f"-O{o}",
             str(cpp_path),
             "-o", str(output),
@@ -134,6 +148,7 @@ def jit(func: Callable[P, T] | None = None, *, cxx: int = 17, o: int = 3) -> Cal
             argtypes.append(type_wrap[arg_type])
         
         jitFn = JitFunction(func, str(output), type_wrap[type_ret], argtypes)
+        
         @wraps(func)
         def func_wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
             return jitFn(*args, **kwargs)

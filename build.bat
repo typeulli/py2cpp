@@ -15,14 +15,15 @@ IF %ERRORLEVEL% NEQ 0 (
 
 echo [3] Uploading package via twine...
 python -m twine upload dist/*
-IF %ERRORLEVEL% NEQ 0 (
-    echo Upload failed.
-    exit /b 1
-)
 
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist py2cpp.egg-info rmdir /s /q py2cpp.egg-info
+
+IF %ERRORLEVEL% NEQ 0 (
+    echo Upload failed.
+    exit /b 1
+)
 
 echo Done.
 endlocal
