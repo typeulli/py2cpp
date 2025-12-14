@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
+from py2cpp.setting import PATH_COMPILER
 from py2cpp.utils.type import FunctionTypeData, parse_types, TypeContext, TypeData
 from py2cpp.utils.code import assert_type, get_time
 from py2cpp.utils.parse import pad, unwrap_paren, CommentInfo, parse_comments
@@ -728,7 +729,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                 else:
                     type_data = type_ctx.get_vartype(loc)
 
-                    if type_data.type_ == "py2cpp_header.c_array":
+                    if type_data.type_.split(".")[-1] == "c_array":
                         assert len(type_data.generics) == 2
                         base_type = __parse_type(assert_type(type_data.generics[0], TypeData))
                         array_size_literal = type_data.generics[1]
@@ -780,7 +781,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     val, extra = __dfs_stmt(value)
                     if extra != "": result += extra + "\n"
                     type_data = type_ctx.get_vartype(loc)
-                    if type_data.type_ == "py2cpp_header.c_array":
+                    if type_data.type_.split(".")[-1] == "c_array":
                         assert len(type_data.generics) == 2
                         base_type = __parse_type(assert_type(type_data.generics[0], TypeData))
                         array_size_literal = type_data.generics[1]
@@ -1038,37 +1039,44 @@ def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = Non
     _dfs = get_time(dfs) if verbose else dfs
     code_body = _dfs(tree, type_ctx, state=state)
 
+
+
+    
+    code_struct = ""
+    for struct in type_ctx.struct_dict.values():
+        code_struct += "struct " + struct.name + " {\n"
+        for field_name, field_type in struct.fields.items():
+            code_struct += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
+        code_struct += "};\n\n"
+        
+
+
+
+    code_builtin: str = ""
     include_set: set[str] = set()
     for b in state.used_builtins:
-        code += b.toString(include_set)
+        code_builtin += b.toString(include_set)
 
     if include_set:
-        code += "\n"
-
-
+        code_builtin += "\n"
 
     __is_used_builtin: Callable[[str], bool] = lambda name: NameDict[name][0] in state.used_builtins
     for name in state.setting.minimize_namespace:
         builtin, full_name = NameDict[name]
         if builtin in state.used_builtins:
-            code += f"using {full_name};\n"
+            code_builtin += f"using {full_name};\n"
 
     if any(map(__is_used_builtin, state.setting.minimize_namespace)) and not code.endswith("\n\n"):
-        code += "\n"
+        code_builtin += "\n"
 
 
-
-    for struct in type_ctx.struct_dict.values():
-        code += "struct " + struct.name + " {\n"
-        for field_name, field_type in struct.fields.items():
-            code += "    " + parse_type(field_type.type_, type_ctx, state) + " " + field_name + ";\n"
-        code += "};\n\n"
     
+    code_global = ""
     state.global_code = state.global_code.strip("\n")
     if state.global_code:
-        code += state.global_code + "\n\n"
+        code_global += state.global_code + "\n\n"
 
-    code += code_body
+    code = code_builtin + code_struct + code_global + code_body
 
     return CppnizeResult(code=code, type_ctx=type_ctx, state=state)
 
@@ -1080,7 +1088,7 @@ def build_cpp_to_exe(cpp_code: str, output_path: str):
         tmp_cpp_path = f.name
 
     try:
-        compile_command = ["g++", tmp_cpp_path, "-o", output_path, "-std=c++11"]
+        compile_command = [PATH_COMPILER, tmp_cpp_path, "-o", output_path, "-std=c++11"]
         result = subprocess.run(compile_command, capture_output=True, text=True)
 
         if result.returncode != 0:
