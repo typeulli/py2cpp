@@ -11,7 +11,7 @@ from typing import Callable, Literal
 from py2cpp.setting import PATH_COMPILER
 from py2cpp.utils.type import FunctionTypeData, parse_types, TypeContext, TypeData
 from py2cpp.utils.code import assert_type, get_time
-from py2cpp.utils.parse import pad, unwrap_paren, CommentInfo, parse_comments
+from py2cpp.utils.parse import indexMultiLine, pad, unwrap_paren, CommentInfo, parse_comments
 
 
 path_here = Path(__file__).parent
@@ -64,6 +64,8 @@ Tuple = Builtins("#include <tuple>", inline=True)
 CMath = Builtins("#include <cmath>", inline=True)
 Complex = Builtins("#include <complex>", inline=True)
 
+Python = Builtins("#include <Python.h>", inline=True)
+
 NameDict: dict[str, tuple[Builtins, str]] = {
     "string": (String, "std::string"),
     "vector": (List, "std::vector"),
@@ -79,6 +81,7 @@ NameDict: dict[str, tuple[Builtins, str]] = {
     "flush": (IOStream, "std::flush"),
     "pow": (CMath, "std::pow"),
     "complex": (Complex, "std::complex"),
+    "@python": (Python, ""),
 }
 
 @dataclass
@@ -90,6 +93,8 @@ class DefaultTypesSetting:
 @dataclass
 class Setting:
     indent: str = "    "
+    use_py: bool = True
+    py_to_comment: bool = False
     minimize_namespace: list[str] = field(default_factory=lambda: [])
     default_types: DefaultTypesSetting = field(default_factory=DefaultTypesSetting)
 
@@ -149,11 +154,16 @@ class State:
 @dataclass
 class StmtState:
     state: State
-    extra_codes: list[str] = field(default_factory=lambda: [])
+    extra_codes_pre: list[str] = field(default_factory=lambda: [])
+    extra_codes_post: list[str] = field(default_factory=lambda: [])
 
     @property
-    def collect_extra_codes(self) -> str:
-        return "\n".join(self.extra_codes)
+    def collect_pre_extra(self) -> str:
+        return "\n".join(self.extra_codes_pre)
+
+    @property
+    def collect_post_extra(self) -> str:
+        return "\n".join(self.extra_codes_post)
 
 @dataclass
 class ScriptTemplateAssign:
@@ -167,12 +177,13 @@ class ScriptTemplate(metaclass=ABCMeta):
     def format(self, stmt_state: StmtState, **kwargs: str) -> str: ...
 
 class ScriptTemplateSimple(ScriptTemplate):
-    def __init__(self, code: str, result_expr: str, require_vars: list[str] | None = None):
-        self.code = code.lstrip("\n").rstrip("\n")
+    def __init__(self, pre: str, result_expr: str, post: str="", require_vars: list[str] | None = None, require_names: list[str] | None = None) -> None:
+        self.pre = pre.lstrip("\n").rstrip("\n")
+        self.post = post.lstrip("\n").rstrip("\n")
         self.result_expr = result_expr
         self.require_vars = require_vars if require_vars is not None else []
-        self.require_tmps: list[str] = re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.code) + re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
-        self.require_names: list[str] = re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.code) + re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
+        self.require_tmps: list[str] = re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.pre) + re.findall(r"\{(_[a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
+        self.require_names: list[str] = (require_names or []) + re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.pre) + re.findall(r"\{__([a-zA-Z][a-zA-Z0-9_]*)\}", self.result_expr)
 
     def format(self, stmt_state: StmtState, **kwargs: str) -> str:
         state = stmt_state.state
@@ -184,11 +195,12 @@ class ScriptTemplateSimple(ScriptTemplate):
 
         names = {"__"+name: state.get_name(name) for name in self.require_names}
 
-        stmt_state.extra_codes.append(self.code.format(**tmp_vars, **kwargs, **names))
+        stmt_state.extra_codes_pre.append(self.pre.format(**tmp_vars, **kwargs, **names))
+        stmt_state.extra_codes_post.append(self.post.format(**tmp_vars, **kwargs, **names))
         return self.result_expr.format(**tmp_vars, **kwargs, **names)
 
 Template_String_Upper = ScriptTemplateSimple(
-    code="""
+    pre="""
 {__string} {_tmp1} = {string};
 {__transform}({_tmp1}.begin(), {_tmp1}.end(), {_tmp1}.begin(), {__toupper});
 """,
@@ -196,7 +208,7 @@ Template_String_Upper = ScriptTemplateSimple(
 )
 
 Template_String_Lower = ScriptTemplateSimple(
-    code="""
+    pre="""
 {__string} {_tmp1} = {string};
 {__transform}({_tmp1}.begin(), {_tmp1}.end(), {_tmp1}.begin(), {__tolower});
 """,
@@ -204,7 +216,7 @@ Template_String_Lower = ScriptTemplateSimple(
 )
 
 Template_Pop_NoIndex = ScriptTemplateSimple(
-    code="""
+    pre="""
 auto {_tmp1} = {list};
 auto {_tmp2} = {_tmp1}.back();
 {_tmp1}.pop_back();
@@ -214,7 +226,7 @@ auto {_tmp2} = {_tmp1}.back();
 )
 
 Template_Pop_WithIndex = ScriptTemplateSimple(
-    code="""
+    pre="""
 auto {_tmp1} = {list};
 auto {_tmp2} = {_tmp1}[{index}];
 {_tmp1}.erase({_tmp1}.begin() + {index});
@@ -223,29 +235,65 @@ auto {_tmp2} = {_tmp1}[{index}];
     require_vars=["list", "index"]
 )
 
+Template_Python_Call = ScriptTemplateSimple(
+    pre="""
+PyObject* {_tmp1} = PyObject_CallObject({func}, {args});
+if ({_tmp1} == nullptr) {{ return nullptr; }}
+""",
+    result_expr="{_tmp1}",
+    post = """
+Py_DECREF({_tmp1});
+""",
+    require_vars=["func", "args"],
+    require_names=["@python"]
+)
+
+Template_Python_Getattr = ScriptTemplateSimple(
+    pre="""
+PyObject* {_tmp1} = PyObject_GetAttrString({obj}, {attr_name});
+if ({_tmp1} == nullptr) {{ return nullptr; }}
+""",
+    result_expr="{_tmp1}",
+    post = """
+Py_DECREF({_tmp1});
+""",
+    require_vars=["obj", "attr_name"],
+    require_names=["@python"]
+)
+
+Template_Python_Setattr = ScriptTemplateSimple(
+    pre="""
+int {_tmp1} = PyObject_SetAttrString({obj}, {attr_name}, {value});
+if ({_tmp1} != 0) {{ return nullptr; }}
+""",
+    result_expr="",
+    require_vars=["obj", "attr_name", "value"],
+    require_names=["@python"]
+)
+
 class ScriptTemplateClsInput(ScriptTemplate):
     def __init__(self) -> None:
         self.Template_Input_GetValue = ScriptTemplateSimple(
-            code="""
+            pre="""
 {__string} {_tmp1};
 {__getline}({__cin}, {_tmp1});
 """,
             result_expr="{_tmp1}"
         )
         self.Template_Input_SaveValue = ScriptTemplateSimple(
-            code="{__getline}({__cin}, {var});",
+            pre="{__getline}({__cin}, {var});",
             result_expr=""
         )
     
     def format(self, stmt_state: StmtState, **kwargs: str) -> str:
         if "prompt" in kwargs:
-            stmt_state.extra_codes.append(stmt_state.state.get_name("cout") + " << " + kwargs["prompt"] + " << " + stmt_state.state.get_name("flush") + ";")
+            stmt_state.extra_codes_pre.append(stmt_state.state.get_name("cout") + " << " + kwargs["prompt"] + " << " + stmt_state.state.get_name("flush") + ";")
             kwargs.pop("prompt")
         if "var" in kwargs:
             var = kwargs["var"]
             if var not in stmt_state.state.defined:
                 stmt_state.state.defined[var] = True
-                stmt_state.extra_codes.append(f"{stmt_state.state.get_name('string')} {var};")
+                stmt_state.extra_codes_pre.append(f"{stmt_state.state.get_name('string')} {var};")
             self.Template_Input_SaveValue.format(stmt_state, **kwargs)
             return ""
         else:
@@ -258,14 +306,33 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
     match type(expr):
         case ast.Name:
             assert type(expr) == ast.Name
+            if expr.id in type_ctx.struct_dict:
+                return TypeData(type_=expr.id)
+            test_func = type_ctx.type_dict.get(expr.id)
+            if type(test_func) == FunctionTypeData:
+                return test_func
             type_ = type_ctx.type_dict[path + expr.id]
             assert type_ != "Any"
             return type_
         case ast.Call:
             assert type(expr) == ast.Call
-            func = eval_type(expr.func, type_ctx, state, path)
-            assert type(func) == FunctionTypeData
-            return func.return_type
+            assert type(expr.func) == ast.Name
+            match expr.func.id:
+                case "int": return TypeData(type_="builtins.int")
+                case "float": return TypeData(type_="builtins.float")
+                case "str": return TypeData(type_="builtins.str")
+                case "bool": return TypeData(type_="builtins.bool")
+                case "complex": return TypeData(type_="builtins.complex")
+                case "c_short" | "c_ushort" | "c_int" | "c_uint" | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong" | "c_float" | "c_double" | "c_char" | "c_bool" | "c_void":
+                    return TypeData(type_="py2cpp." + expr.func.id)
+                case "py_object":
+                    return TypeData(type_="py2cpp.py_object")
+                case _:
+                    func = eval_type(expr.func, type_ctx, state, path)
+                    if func.is_py_object:
+                        return TypeData(type_="py2cpp.py_object")
+                    assert type(func) == FunctionTypeData
+                    return func.return_type
         case ast.Constant:
             assert type(expr) == ast.Constant
             if type(expr.value) == int:
@@ -288,17 +355,21 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
                 return left_type
             if left_type.type_ == "builtins.float" or right_type.type_ == "builtins.float":
                 return TypeData(type_="builtins.float")
+            for _t in ("c_ulonglong", "c_longlong", "c_ulong", "c_long", "c_uint", "c_int", "c_ushort", "c_short"):
+                if left_type.is_py2cpp_type(_t) or right_type.is_py2cpp_type(_t):
+                    return TypeData(type_="py2cpp." + _t)
             return TypeData(type_="builtins.int")
         case ast.Attribute:
             assert type(expr) == ast.Attribute
             value_type = eval_type(expr.value, type_ctx, state, path)
+            if value_type.is_py_object:
+                return TypeData(type_="py2cpp.py_object")
             if value_type.type_.split(".")[-1] in type_ctx.struct_dict:
                 struct_def = type_ctx.struct_dict[value_type.type_.split(".")[-1]]
                 if expr.attr in struct_def.fields:
                     return struct_def.fields[expr.attr].type_
                 raise TypeError(f"Attribute '{expr.attr}' not found in struct '{value_type.type_}'")
-            base_type = eval_type(expr.value, type_ctx, state, path)
-            raise TypeError(f"Unsupported at eval_type: attr for '{base_type.type_}'")
+            raise TypeError(f"Unsupported at eval_type: attr for '{value_type.type_}'")
         case _:
             raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
     raise RuntimeError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
@@ -352,6 +423,9 @@ def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
     if dot_index != -1:
         if dot_index > data.type_.find("["):
             return __parse_type(TypeData(type_=data.type_[dot_index+1:], generics=data.generics))
+    
+    if state.setting.use_py:
+        return "PyObject*"
 
     raise ValueError(f"Unknown type: {data.type_}")
 
@@ -380,7 +454,15 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.Attribute:
             assert type(node) == ast.Attribute
-            if eval_type(node.value, type_ctx, state, path).type_ == "builtins.complex":
+            type_data = eval_type(node.value, type_ctx, state, path)
+            if direct.type_ != "assign" and type_data.is_py_object:
+                get_attr = Template_Python_Getattr.format(
+                    stmt_state,
+                    obj=__dfs_stmt(node.value),
+                    attr_name="\"" + node.attr + "\""
+                )
+                return get_attr
+            if type_data.type_ == "builtins.complex":
                 if node.attr in ("real", "imag"):
                     return __dfs_stmt(node.value) + "." + node.attr + "()"
             return __dfs_stmt(node.value) + "." + node.attr
@@ -414,17 +496,67 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                         return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
                     case "c_short" | "c_ushort" | "c_int" | "c_uint" | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong":
                         if len(node.args) != 1: raise SyntaxError(f"{func.id} requires exactly one argument")
-                        val_exp = assert_type(node.args[0], ast.Constant)
-                        val_int = assert_type(val_exp.value, int)
-                        match func.id:
-                            case "c_short": return str(val_int % (1<<16) - (1<<16) if val_int >= (1<<15) else val_int % (1<<16))
-                            case "c_ushort": return str(val_int % (1<<16))
-                            case "c_int": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32))
-                            case "c_uint": return str(val_int % (1<<32))
-                            case "c_long": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32)) + "L"
-                            case "c_ulong": return str(val_int % (1<<32)) + "UL"
-                            case "c_longlong": return str(val_int % (1<<64) - (1<<64) if val_int >= (1<<63) else val_int % (1<<64)) + "LL"
-                            case "c_ulonglong": return str(val_int % (1<<64)) + "ULL"
+                        arg = node.args[0]
+                        if type(arg) == ast.Constant:
+                            value = arg.value
+                            if type(value) == int or type(value) == float:
+                                val_int = int(value)
+                                match func.id:
+                                    case "c_short": return str(val_int % (1<<16) - (1<<16) if val_int >= (1<<15) else val_int % (1<<16))
+                                    case "c_ushort": return str(val_int % (1<<16))
+                                    case "c_int": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32))
+                                    case "c_uint": return str(val_int % (1<<32))
+                                    case "c_long": return str(val_int % (1<<32) - (1<<32) if val_int >= (1<<31) else val_int % (1<<32)) + "L"
+                                    case "c_ulong": return str(val_int % (1<<32)) + "UL"
+                                    case "c_longlong": return str(val_int % (1<<64) - (1<<64) if val_int >= (1<<63) else val_int % (1<<64)) + "LL"
+                                    case "c_ulonglong": return str(val_int % (1<<64)) + "ULL"
+                        arg_type = eval_type(arg, type_ctx, state, path)
+                        if func.id == "c_long" and arg_type.is_py_object:
+                            return "PyLong_AsLong(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                        raise NotImplementedError(f"Unsupported argument type for {func.id}(): {type(arg)}")
+                    case "c_bool":
+                        if len(node.args) != 1: raise SyntaxError("c_bool requires exactly one argument")
+                        arg = node.args[0]
+                        arg_type = eval_type(arg, type_ctx, state, path)
+                        if arg_type.is_py_object:
+                            return "(PyObject_IsTrue(" + unwrap_paren(__dfs_stmt(arg)) + ") != 0)"
+                        match arg_type.type_:
+                            case "builtins.bool":
+                                return unwrap_paren(__dfs_stmt(arg))
+                            case "builtins.int":
+                                return "(" + unwrap_paren(__dfs_stmt(arg)) + " != 0)"
+                            case _:
+                                raise NotImplementedError(f"Unsupported argument type for c_bool(): {arg_type.type_}")
+                    case "py_object":
+                        if len(node.args) != 1: raise SyntaxError("py_object requires exactly one argument")
+                        arg = node.args[0]
+                        type_data = eval_type(arg, type_ctx, state, path)
+                        if type_data.type_.startswith("py2cpp"):
+                            match type_data.type_.split(".")[-1]:
+                                case "c_short" | "c_ushort" | "c_int" | "c_uint" | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong":
+                                    return "PyLong_FromLongLong(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                                case "c_float" | "c_double":
+                                    return "PyFloat_FromDouble(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                                case "c_char":
+                                    return "PyBytes_FromStringAndSize(&" + unwrap_paren(__dfs_stmt(arg)) + ", 1)"
+                                case "c_bool":
+                                    return "PyBool_FromLong(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                                case "c_void":
+                                    return "Py_None"
+                                case _:
+                                    raise NotImplementedError(f"Unsupported argument type for py_object(): {type_data.type_}")
+                        
+                        match type_data.type_:
+                            case "builtins.str":
+                                return "PyUnicode_FromString(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case "builtins.int":
+                                return "PyLong_FromLongLong(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case "builtins.float":
+                                return "PyFloat_FromDouble(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case "builtins.bool":
+                                return "PyBool_FromLong(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case _:
+                                raise NotImplementedError(f"Unsupported argument type for py_object(): {type_data.type_}") 
                     case "print":
                         keywords = node.keywords
 
@@ -488,6 +620,17 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                     case "c_array":
                         return "{}"
                     case _:
+                        typ = eval_type(func, type_ctx, state, path).type_
+                        if typ.startswith("py2cpp") and typ.endswith("py_object"):
+                            args_list = "PyTuple_Pack(" + str(len(node.args))
+                            for arg in node.args:
+                                args_list += ", " + unwrap_paren(__dfs_stmt(arg))
+                            args_list += ")"
+                            return Template_Python_Call.format(
+                                stmt_state,
+                                func=__dfs_stmt(func),
+                                args=args_list
+                            )
                         return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
 
             if type(func) == ast.Attribute:
@@ -544,10 +687,34 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.BinOp:
             assert type(node) == ast.BinOp
+            left_type = eval_type(node.left, type_ctx, state, path)
+            right_type = eval_type(node.right, type_ctx, state, path)
+            
+            assert left_type.is_py_object == right_type.is_py_object, "Mixing py_object with other types is not supported in binary operations"
+            
+            if left_type.is_py_object:
+                py_ops: dict[type[ast.operator], str] = {
+                    ast.Add: "PyNumber_Add",
+                    ast.Sub: "PyNumber_Subtract",
+                    ast.Mult: "PyNumber_Multiply",
+                    ast.Div: "PyNumber_TrueDivide",
+                    ast.Mod: "PyNumber_Remainder",
+                    ast.LShift: "PyNumber_Lshift",
+                    ast.RShift: "PyNumber_Rshift",
+                    ast.BitOr: "PyNumber_Or",
+                    ast.BitAnd: "PyNumber_And",
+                    ast.BitXor: "PyNumber_Xor",
+                    ast.Pow: "PyNumber_Power"
+                }
+                if type(node.op) in py_ops:
+                    func_name = py_ops[type(node.op)]
+                    stmt_state.state.used_builtins.add(Python)
+                    return f"{func_name}({__dfs_stmt(node.left)}, {__dfs_stmt(node.right)})"
+                raise NotImplementedError(f"Unsupported operator for py_object: {type(node.op)}")
+            
             if type(node.op) in (ast.Add, ast.Sub):
                 try:
-                    left_type = eval_type(node.left, type_ctx, state, path)
-                    right_type = eval_type(node.right, type_ctx, state, path)
+                    
                     if left_type.type_ in ("builtins.int", "builtins.float") and type(node.right) == ast.Constant and isinstance(node.right.value, complex):
                         assert node.right.value.real == 0.0
                         return state.get_name("complex") + "<double>(" + __dfs_stmt(node.left) + ", " + ("" if type(node.op) == ast.Add else "-") + str(abs(node.right.value.imag)) + ")"
@@ -581,6 +748,22 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.UnaryOp:
             assert type(node) == ast.UnaryOp
+            
+            node_type = eval_type(node.operand, type_ctx, state, path)
+            
+            if node_type.is_py_object:
+                py_unary_ops: dict[type[ast.unaryop], str] = {
+                    ast.UAdd: "PyNumber_Positive",
+                    ast.USub: "PyNumber_Negative",
+                    ast.Not: "PyObject_Not",
+                    ast.Invert: "PyNumber_Invert",
+                }
+                if type(node.op) in py_unary_ops:
+                    func_name = py_unary_ops[type(node.op)]
+                    stmt_state.state.used_builtins.add(Python)
+                    return f"{func_name}({__dfs_stmt(node.operand)})"
+                raise NotImplementedError(f"Unsupported unary operator for py_object: {type(node.op)}")
+            
             unary_ops: dict[type[ast.unaryop], str] = {
                 ast.UAdd: "+",
                 ast.USub: "-",
@@ -634,10 +817,10 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
         return pad(code, state.setting.indent)
     def __dfs(node: ast.stmt) -> str:
         return dfs(node, type_ctx, state, depth + 1, path)
-    def __dfs_stmt(node: ast.expr, *, direct: DirectData = DirectData()) -> tuple[str, str]:
+    def __dfs_stmt(node: ast.expr, *, direct: DirectData = DirectData()) -> tuple[str, str, str]:
         stmt_state = StmtState(state)
         _val = dfs_stmt(node, type_ctx, stmt_state, path, direct=direct)
-        return _val, stmt_state.collect_extra_codes
+        return _val, stmt_state.collect_pre_extra, stmt_state.collect_post_extra
     def __parse_type(type_: TypeData) -> str:
         return parse_type(type_, type_ctx, state)
 
@@ -666,6 +849,28 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
 
     assert isinstance(node, ast.stmt)
     
+    if state.setting.py_to_comment:
+        start_line = node.lineno - 1
+        end_line = node.end_lineno - 1 if node.end_lineno is not None else start_line
+        start_col = node.col_offset
+        end_col = node.end_col_offset if node.end_col_offset is not None else len(state.origin_code.code.splitlines()[end_line])
+
+        for child in getattr(node, "body", []) + getattr(node, "orelse", []):
+            if not isinstance(child, ast.stmt):
+                continue
+            
+            if child.lineno - 1 < end_line:
+                end_line = child.lineno - 1
+                end_col = child.col_offset - 1
+            elif child.lineno - 1 == end_line and child.col_offset < end_col:
+                end_col = child.col_offset - 1
+            if end_col < 0:
+                end_line -= 1
+                end_col = 0
+        py_code = indexMultiLine(state.origin_code.code, start_line, start_col, end_line, end_col)
+        py_code = py_code.rstrip()
+        result += "// " + py_code.replace("\n", "\n// ") + "\n"
+    
     comments_prev, comments_now = state.origin_code.popComments(node)
     comments_now_code = (" //" + comments_now.text) if comments_now is not None else ""
     
@@ -680,6 +885,8 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
         
         case ast.Assign:
             assert type(node) == ast.Assign
+
+            post = ""
 
             if len(node.targets) == 1:
                 target = node.targets[0]
@@ -701,8 +908,9 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                             assert type(target) == ast.Subscript
                             is_direct_access = False
                             
-                            val, extra = __dfs_stmt(target.slice)
-                            if extra != "": result += extra + "\n"
+                            val, extra_pre, extra_post = __dfs_stmt(target.slice)
+                            if extra_pre != "": result += extra_pre + "\n"
+                            if extra_post != "": post = extra_post + "\n" + post
 
                             target_str = "[" + unwrap_paren(val) + "]" + target_str
                             target_new = target.value
@@ -718,10 +926,11 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     break
 
 
-                val, extra = __dfs_stmt(node.value, direct=DirectData(type_="assign", value=target_str))
+                val, extra_pre, extra_post = __dfs_stmt(node.value, direct=DirectData(type_="assign", value=target_str))
                 
-                if val == "": return extra + comments_now_code
-                if extra != "": result += extra + "\n"
+                if val == "": return extra_pre + comments_now_code
+                if extra_pre != "": result += extra_pre + "\n"
+                if extra_post != "": post = extra_post + "\n" + post
 
                 loc = path + target_str
                 if not is_direct_access or loc in state.defined:
@@ -754,6 +963,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                         state.defined[loc] = True
 
             result += comments_now_code
+            if post: result += "\n" + post.strip("\n")
 
         case ast.AnnAssign:
             assert type(node) == ast.AnnAssign
@@ -773,13 +983,14 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
             if type(target) == ast.Name:
                 loc = path + target.id
                 if loc in state.defined:
-                    val, extra = __dfs_stmt(value)
-                    if extra != "": result += extra + "\n"
+                    val, extra_pre, extra_post = __dfs_stmt(value)
+                    if extra_pre != "": result += extra_pre + "\n"
 
                     result += path + " = " + val + ";"
+                    if extra_post != "": result += "\n" + extra_post
                 else:
-                    val, extra = __dfs_stmt(value)
-                    if extra != "": result += extra + "\n"
+                    val, extra_pre, extra_post = __dfs_stmt(value)
+                    if extra_pre != "": result += extra_pre + "\n"
                     type_data = type_ctx.get_vartype(loc)
                     if type_data.type_.split(".")[-1] == "c_array":
                         assert len(type_data.generics) == 2
@@ -792,6 +1003,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     else:
                         type_ = __parse_type(type_data)
                         result += f"{const_str}{type_} {target.id} = {val};"
+                    if extra_post != "": result += "\n" + extra_post
                     state.defined[loc] = True
 
             result += comments_now_code
@@ -815,9 +1027,9 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     ast.BitXor: "^=",
                     ast.FloorDiv: "//=",
                 }
-                val, extra = __dfs_stmt(node.value)
-                if extra != "":
-                    result += extra + "\n"
+                val, extra_pre, extra_post = __dfs_stmt(node.value)
+                if extra_pre != "":
+                    result += extra_pre + "\n"
                     
                 op = _op_to_str[type(node.op)]
 
@@ -829,8 +1041,11 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     result += "--" + target.id + ";"
                 else:
                     result += target.id + " " + op + " " + val + ";"
+                    
+                if extra_post != "": result += "\n" + extra_post
 
             result += comments_now_code
+            
                 
 
         case ast.Expr:
@@ -838,20 +1053,21 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
             call_expr = node.value
             if type(call_expr) == ast.Call and type(call_expr.func) == ast.Name and call_expr.func.id == "c_exitcode":
                 assert depth == 1, "c_exitcode can only be used in the main function"
-                val, extra = __dfs_stmt(call_expr.args[0])
-                if extra != "": result += extra + "\n"
+                val, extra_pre, extra_post = __dfs_stmt(call_expr.args[0])
+                if extra_pre != "": result += extra_pre + "\n"
                 result += "return " + val + ";"
             else:
-                val, extra = __dfs_stmt(call_expr)
-                if extra != "": result += extra + "\n"
+                val, extra_pre, extra_post = __dfs_stmt(call_expr)
+                if extra_pre != "": result += extra_pre + "\n"
                 result += val + ";"
 
+            if extra_post != "": result += "\n" + extra_post
             result += comments_now_code
 
         case ast.If:
             assert type(node) == ast.If
-            val, extra = __dfs_stmt(node.test)
-            if extra != "": result += extra + "\n"
+            val, extra_pre, extra_post = __dfs_stmt(node.test)
+            if extra_pre != "": result += extra_pre + "\n"
 
             result += "if (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
@@ -865,9 +1081,12 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     for stmt in node.orelse:
                         result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
                     result += "}"
+            
+            if extra_post != "": result += "\n" + extra_post
 
         case ast.For:
             assert type(node) == ast.For
+            extra_post = extra_post_start = extra_post_step = extra_post_end = ""
 
             target = node.target
             iter = node.iter
@@ -877,28 +1096,28 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     loc = path + target.id
 
                     if len(iter.args) == 1:
-                        val_end, extra = __dfs_stmt(iter.args[0])
-                        if extra != "": result += extra + "\n"
+                        val_end, extra_pre, extra_post = __dfs_stmt(iter.args[0])
+                        if extra_pre != "": result += extra_pre + "\n"
 
                         start = "0"
                         end = val_end
                         step = "1"
                     elif len(iter.args) == 2:
-                        val_start, extra_start = __dfs_stmt(iter.args[0])
-                        val_end, extra_end = __dfs_stmt(iter.args[1])
-                        if extra_start != "": result += extra_start + "\n"
-                        if extra_end != "": result += extra_end + "\n"
+                        val_start, extra_pre_start, extra_post_start = __dfs_stmt(iter.args[0])
+                        val_end, extra_pre_end, extra_post_end = __dfs_stmt(iter.args[1])
+                        if extra_pre_start != "": result += extra_pre_start + "\n"
+                        if extra_pre_end != "": result += extra_pre_end + "\n"
 
                         start = val_start
                         end = val_end
                         step = "1"
                     elif len(iter.args) == 3:
-                        val_start, extra_start = __dfs_stmt(iter.args[0])
-                        val_end, extra_end = __dfs_stmt(iter.args[1])
-                        val_step, extra_step = __dfs_stmt(iter.args[2])
-                        if extra_start != "": result += extra_start + "\n"
-                        if extra_end != "": result += extra_end + "\n"
-                        if extra_step != "": result += extra_step + "\n"
+                        val_start, extra_pre_start, extra_post_start = __dfs_stmt(iter.args[0])
+                        val_end, extra_pre_end, extra_post_end = __dfs_stmt(iter.args[1])
+                        val_step, extra_pre_step, extra_post_step = __dfs_stmt(iter.args[2])
+                        if extra_pre_start != "": result += extra_pre_start + "\n"
+                        if extra_pre_end != "": result += extra_pre_end + "\n"
+                        if extra_pre_step != "": result += extra_pre_step + "\n"
 
                         start = val_start
                         end = val_end
@@ -913,25 +1132,32 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     state.used_builtins.add(CStdDef)
                     result += "for (" + ("size_t " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + exp_change + ") {\n"
                 else:
-                    val, extra = __dfs_stmt(iter)
-                    if extra != "": result += extra + "\n"
+                    val, extra_pre, extra_post = __dfs_stmt(iter)
+                    if extra_pre != "": result += extra_pre + "\n"
                     result += "for (auto " + target.id + " : " + val + ") {\n"
             else:
                 raise NotImplementedError("Only simple variable as for loop target is supported")
             for stmt in body:
                 result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
+            
+            if extra_post_start != "": result += "\n" + extra_post_start
+            if extra_post_step != "": result += "\n" + extra_post_step
+            if extra_post_end != "": result += "\n" + extra_post_end
+            if extra_post != "": result += "\n" + extra_post
 
         case ast.While:
             assert type(node) == ast.While
 
-            val, extra = __dfs_stmt(node.test)
-            if extra != "": result += extra + "\n"
+            val, extra_pre, extra_post = __dfs_stmt(node.test)
+            if extra_pre != "": result += extra_pre + "\n"
 
             result += "while (" + unwrap_paren(val) + ") {\n"
             for stmt in node.body:
                 result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
+            
+            if extra_post != "": result += "\n" + extra_post
 
         case ast.FunctionDef:
             assert type(node) == ast.FunctionDef
@@ -960,9 +1186,14 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
             if (type(value) == ast.Name and value.id == "void") or value is None:
                 result += "return;"
             else:
-                val, extra = __dfs_stmt(value)
-                if extra != "": result += extra + "\n"
-                result += "return " + unwrap_paren(val) + ";"
+                val, extra_pre, extra_post = __dfs_stmt(value)
+                if extra_pre != "": result += extra_pre + "\n"
+                
+                if extra_post == "":
+                    result += "return " + unwrap_paren(val) + ";"
+                else:
+                    retVar = state.get_tempid()
+                    result += f"""auto {retVar} = {unwrap_paren(val)};\n{extra_post}\nreturn {retVar};"""
 
             result += comments_now_code
 
@@ -1028,13 +1259,15 @@ class CppnizeResult:
 
 def py_2_cpp(text: str, path: str = "<string>", *, setting: Setting | None = None, verbose: bool = False) -> CppnizeResult:
     compile(text, filename=path, mode='exec', flags=ast.PyCF_ONLY_AST, dont_inherit=True, optimize=-1)
+    
+    _setting = setting or Setting()
 
     _parse_types = get_time(parse_types) if verbose else parse_types
-    type_ctx = _parse_types(text)
+    type_ctx = _parse_types(text, force_typed=not _setting.use_py)
 
     tree = ast.parse(text, filename=path)
 
-    state = State(origin_code=Code(text), setting=setting or Setting())
+    state = State(origin_code=Code(text), setting=_setting)
     code = ""
     _dfs = get_time(dfs) if verbose else dfs
     code_body = _dfs(tree, type_ctx, state=state)

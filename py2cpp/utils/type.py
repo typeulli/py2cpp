@@ -44,6 +44,13 @@ class TypeData:
         if current_generic:
             generics.append(TypeData.from_str(current_generic.strip()))
         return cls(type_=typename, generics=generics)
+    
+    def is_py2cpp_type(self, typename: str) -> bool:
+        return self.type_.startswith("py2cpp.") and self.type_.split(".")[-1] == typename
+    
+    @property
+    def is_py_object(self) -> bool:
+        return self.is_py2cpp_type("py_object")
 
 class FunctionTypeData(TypeData):
     def __init__(self, args: list[tuple[str, TypeData]], return_type: TypeData):
@@ -248,7 +255,7 @@ class TypeContext:
             current_type = field_data.type_
         return current_type
 
-def parse_types(text: str, path_scripts: list[str] = []) -> TypeContext:
+def parse_types(text: str, path_scripts: list[str] = [], *, force_typed: bool = True) -> TypeContext:
 
     tree = ast.parse(text)
 
@@ -313,7 +320,7 @@ def parse_types(text: str, path_scripts: list[str] = []) -> TypeContext:
                                         s += _name + "#"
                                 key = s + var_name
                             break
-
+                
                 assert type_str != "Any", f"Type of {key} is Any"
                 type_dict[key] = TypeData.from_str(type_str)
     

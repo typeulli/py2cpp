@@ -30,9 +30,9 @@ def unwrap_paren(s: str) -> str:
 def indexMultiLine(text: str, startline: int, startcol: int, endline: int, endcol: int) -> str:
     lines = text.splitlines()[startline:endline+1]
     if startline == endline:
-        return lines[0][startcol-1:endcol]
-    lines[0] = lines[0][startcol-1:]
-    lines[-1] = lines[-1][:endcol]
+        return lines[0][startcol:endcol+1]
+    lines[0] = lines[0][startcol:]
+    lines[-1] = lines[-1][:endcol+1]
     return "\n".join(lines)
 
 @dataclass

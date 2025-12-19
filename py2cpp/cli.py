@@ -31,10 +31,7 @@ def main(input_path: str, output_path: str | None, compile_target: str, print_co
 
     match compile_target or "cpp":
         case 'cpp':
-            try:
-                cpp_code = py_2_cpp(python_code, path=str(input_path_obj), setting=setting).code
-            except Exception as e:
-                raise click.ClickException(f"Error converting Python to C++: {e}")
+            cpp_code = py_2_cpp(python_code, path=str(input_path_obj), setting=setting).code
             output_path_obj.write_text(cpp_code, encoding="utf-8")
         case 'exe':
             py_2_exe(python_code, path=str(output_path_obj), verbose=True, setting=setting)
