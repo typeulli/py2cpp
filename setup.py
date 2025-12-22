@@ -2,7 +2,7 @@ from setuptools import setup, find_packages # type: ignore
 
 setup(
     name="py2cpp",
-    version="1.6.5",
+    version="1.7.0",
     description="A Python-to-C++ translator.",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",

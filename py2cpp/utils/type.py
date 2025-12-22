@@ -15,9 +15,10 @@ class TypeData:
         self.generics = generics if generics is not None else []
     
     @classmethod
-    def from_str(cls, type_str: str) -> "TypeData":
-        if type_str.startswith("def "):
-            return FunctionTypeData.from_str(type_str)
+    def from_str(cls, type_str: str, *, force_typed: bool = True) -> "TypeData":
+        if type_str == "Any":
+            assert not force_typed, "TypeData cannot be 'Any' when force_typed."
+            type_str = "py2cpp.py_object"
         
         if "[" not in type_str:
             return cls(type_=type_str, generics=[])
@@ -51,6 +52,13 @@ class TypeData:
     @property
     def is_py_object(self) -> bool:
         return self.is_py2cpp_type("py_object")
+    
+    def __str__(self) -> str:
+        if self.generics:
+            generics_str = ", ".join(str(g) for g in self.generics)
+            return f"{self.type_}[{generics_str}]"
+        else:
+            return self.type_
 
 class FunctionTypeData(TypeData):
     def __init__(self, args: list[tuple[str, TypeData]], return_type: TypeData):
@@ -60,7 +68,7 @@ class FunctionTypeData(TypeData):
         self.return_type = return_type
 
     @classmethod
-    def from_str(cls, type_str: str) -> "FunctionTypeData":
+    def from_str(cls, type_str: str, *, force_typed: bool = True) -> "FunctionTypeData":
         _match = re.fullmatch(r"def \((.*)\) -> (.*)", type_str)
         args: list[tuple[str, TypeData]] = []
         if _match:
@@ -73,10 +81,10 @@ class FunctionTypeData(TypeData):
                     assert _arg_match
                     arg_name = _arg_match.group(1)
                     arg_type = _arg_match.group(2)
-                    args.append((arg_name, TypeData.from_str(arg_type)))
+                    args.append((arg_name, TypeData.from_str(arg_type, force_typed=force_typed)))
             return cls(
                 args=args,
-                return_type=TypeData.from_str(ret_type)
+                return_type=TypeData.from_str(ret_type, force_typed=force_typed)
             )
         else:
             _match_noreturn = re.fullmatch(r"def \((.*)\)", type_str)
@@ -88,7 +96,7 @@ class FunctionTypeData(TypeData):
                         assert _arg_match
                         arg_name = _arg_match.group(1)
                         arg_type = _arg_match.group(2)
-                        args.append((arg_name, TypeData.from_str(arg_type)))
+                        args.append((arg_name, TypeData.from_str(arg_type, force_typed=force_typed)))
                 return cls(
                     args=args,
                     return_type=TypeData(type_="builtins.None", generics=[])
@@ -226,7 +234,7 @@ def find_node_path(tree: ast.AST, target_node: ast.AST) -> Optional[list[ast.AST
 
         if node is target_node:
             path.extend(current_path)
-            return True  # 찾았음
+            return True
 
         for child in ast.iter_child_nodes(node):
             if visit(child, current_path.copy()):
@@ -321,8 +329,11 @@ def parse_types(text: str, path_scripts: list[str] = [], *, force_typed: bool = 
                                 key = s + var_name
                             break
                 
-                assert type_str != "Any", f"Type of {key} is Any"
-                type_dict[key] = TypeData.from_str(type_str)
+                if type_str.startswith("def "):
+                    type_dict[key] = FunctionTypeData.from_str(type_str, force_typed=force_typed)
+                    continue
+
+                type_dict[key] = TypeData.from_str(type_str, force_typed=force_typed)
     
     for struct in transformer.revealed_structs:
         for field_name, field_data in struct.fields.items():
