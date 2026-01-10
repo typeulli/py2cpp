@@ -5,15 +5,15 @@ import inspect
 import importlib.util
 import subprocess
 import sys
-import sysconfig
 
 from ctypes import wintypes, CDLL
 from dataclasses import dataclass
 from functools import wraps
 from importlib.metadata import version
-from json import load
+from json import dump, load
 from pathlib import Path
-from typing import Any, Callable, Generic, ParamSpec, TypeVar, overload
+from types import CodeType, FrameType, FunctionType, MethodType, ModuleType, TracebackType
+from typing import Any, Callable, Generic, Iterable, Literal, ParamSpec, TypeAlias, TypeVar, overload
 
 from py2cpp import setting as py2cpp_setting
 from py2cpp.core.compiler import Setting, py_2_cpp, FunctionTypeData, parse_type
@@ -55,7 +55,7 @@ def get_extension(system_name: str) -> str:
         raise ValueError(f"Unsupported system: {system_name}")
     return EXTENSIONS[system_name]
 
-def remove_decorators(source: str) -> tuple[ast.FunctionDef, str]:
+def remove_decorators(source: str) -> str:
     astNode = ast.parse(source)
     if not astNode.body:
         raise ValueError("No function definition found in source.")
@@ -71,7 +71,7 @@ def remove_decorators(source: str) -> tuple[ast.FunctionDef, str]:
             decoratorNode.end_col_offset or len(source.splitlines()[end_lineno - 1]) - 1
         )
         source = source.replace(source_decorator + "\n", "", 1)
-    return funcNode, source
+    return source
 
 PY_MODULE_TEMPLATE = """
 
@@ -129,16 +129,15 @@ class JitHeader:
         hasher.update(source.encode("utf-8"))
         return hasher
     
-    
     @property
     def path_meta(self) -> Path:
         py2cpp_setting.PATH_CACHE_JIT.mkdir(exist_ok=True, parents=True)
         path_meta = py2cpp_setting.PATH_CACHE_JIT / f"{self.hash.hexdigest()}.json"
         return path_meta
     
-    
     def __hash__(self) -> int:
         return int(self.hash.hexdigest(), 16)
+
 @dataclass(frozen=True)
 class JitInfo:
     
@@ -183,17 +182,13 @@ class JitInfo:
         return path_clib
     
     def save_meta(self) -> None:
-        import json
         data: dict[str, Any] = {
             "type_return": [k for k, v in CTYPE_MAP.items() if v == self.type_return][0],
             "type_arguments": [[k for k, v in CTYPE_MAP.items() if v == argt][0] for argt in self.type_arguments],
             "py_mode": self.py_mode,
         }
         with self.header.path_meta.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-    
-    def __post_init__(self):
-        self.save_meta()
+            dump(data, f, indent=4)
     
     def __hash__(self) -> int:
         return hash(self.header)
@@ -214,12 +209,17 @@ class JitFunction(Generic[P, T]):
     def __init__(self, func: Callable[P, T], info: JitInfo) -> None:
         self.func = func
         self.info = info
+    
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
+        raise NotImplementedError()
 
 class JitDllFunction(Generic[P, T], JitFunction[P, T]):
     def __init__(self, func: Callable[P, T], info: JitInfo) -> None:
         super().__init__(func, info)
         
-        self.lib = CDLL(str(info.path))
+        try: self.lib = CDLL(str(info.path))
+        except Exception as e:
+            raise RuntimeError(f"Failed to load JIT compiled library from {info.path}: {e}") from e
         self.handle = self.lib._handle
         
         self.cfunc = getattr(self.lib, func.__name__)
@@ -307,16 +307,13 @@ def find_vcvars64() -> Path:
     return vcvars
 
 def compile_pyd(cxx: int, o: int, cpp_path: Path, output: Path):
-    include_py = sysconfig.get_config_var("INCLUDEPY")
-    base = Path(sysconfig.get_config_var("installed_base"))
-    lib_path = base / "libs"
 
     cmd_line = (
         f'call "{find_vcvars64()}" && '
         f'{py2cpp_setting.PATH_COMPILER_PYD} /std:c++{cxx} /LD '
         f'{" /O2" if o >= 2 else "/Od"} '
-        f'/I"{include_py}" "{cpp_path}" '
-        f'/link /LIBPATH:"{lib_path}" python311.lib /OUT:"{output}"'
+        f'/I"{py2cpp_setting.PATH_CPYTHON_INCLUDE}" "{cpp_path}" '
+        f'/link /LIBPATH:"{py2cpp_setting.PATH_CPYTHON_LIB}" python311.lib /OUT:"{output}"'
     )
 
     result = subprocess.run(f'cmd /c "{cmd_line}"', shell=True, text=True, cwd=str(cpp_path.parent), capture_output=True)
@@ -327,20 +324,30 @@ def compile_pyd(cxx: int, o: int, cpp_path: Path, output: Path):
     
     return result
 
+_SourceObjectType: TypeAlias = (
+    ModuleType | type[Any] | MethodType | FunctionType | TracebackType | FrameType | CodeType | Callable[..., Any]
+)
 @overload
-def jit(func: Callable[CP, CT], *, cxx: int = 17, o: int = 3) -> Callable[CP, CT]: ...
+def jit(func: Callable[CP, CT], *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[CP, CT]: ...
 @overload
-def jit(func: None = None, *, cxx: int = 17, o: int = 3) -> Callable[[Callable[CP, CT]], Callable[CP, CT]]: ...
-def jit(func: Callable[CP, CT] | None = None, *, cxx: int = 17, o: int = 3) -> Callable[CP, CT] | Callable[[Callable[CP, CT]], Callable[CP, CT]]:
+def jit(func: Callable[CP, CT], *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> JitFunction[CP, CT]: ...
+@overload
+def jit(func: None = None, *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[[Callable[CP, CT]], Callable[CP, CT]]: ...
+@overload
+def jit(func: None = None, *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[[Callable[CP, CT]], JitFunction[CP, CT]]: ...
+def jit(func: Callable[CP, CT] | None = None, *, pure: bool = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[CP, CT] | Callable[[Callable[CP, CT]], Callable[CP, CT]] | JitFunction[CP, CT] | Callable[[Callable[CP, CT]], JitFunction[CP, CT]]:
     def wrapper(func: Callable[CP, CT]) -> Callable[CP, CT]:
         DELSPEC = "__declspec(dllexport)" if py2cpp_setting.SYSTEM_NAME == "windows" else "__attribute__((visibility(\"default\")))"
         setting = Setting()
         
         source = inspect.getsource(func)
-        funcNode, source = remove_decorators(source)
+        source = remove_decorators(source)
+        
+        for obj in ref:
+            source = inspect.getsource(obj) + "\n\n" + source
         
         jitHeader = JitHeader(
-            source=ast.unparse(funcNode),
+            source=ast.unparse(ast.parse(source)),
             
             system=py2cpp_setting.SYSTEM_NAME,
             cxx=cxx,
@@ -349,7 +356,7 @@ def jit(func: Callable[CP, CT] | None = None, *, cxx: int = 17, o: int = 3) -> C
         jitInfo_Test = JitInfo.load(jitHeader)
         if jitInfo_Test is not None:
             jitFn: JitFunction[CP, CT] = JitFunction[CP, CT].create(func, jitInfo_Test)
-            return jitFn.wrapper
+            return jitFn.wrapper if pure else jitFn
         
         cpp_data = py_2_cpp("from py2cpp.utils.header import *\n" + source, path=f"<jit:{func.__name__}>", setting=setting)
         cpp_code = cpp_data.code
@@ -439,7 +446,9 @@ def jit(func: Callable[CP, CT] | None = None, *, cxx: int = 17, o: int = 3) -> C
             raise RuntimeError(error)
         
         jitFn = JitFunction[CP, CT].create(func, jitInfo)
-        return jitFn.wrapper
+        jitInfo.save_meta()
+        
+        return jitFn.wrapper if pure else jitFn
     
     if func is not None:
         return wrapper(func)

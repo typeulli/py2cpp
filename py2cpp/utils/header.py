@@ -67,10 +67,22 @@ class c_integer(Protocol):
 class c_short:
     def __init__(self, value: int): self.value = value
     def __int__(self) -> int: return self.value
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_short, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
 class c_ushort:
     def __init__(self, value: int): self.value = value
     def __int__(self) -> int: return self.value
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_ushort, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
 
 
@@ -254,6 +266,12 @@ class c_int(c_integer, clike_int):
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_int, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
     
 
 _c_casted_uint: TypeAlias = "int | c_short | c_ushort | c_int | c_uint"
@@ -407,6 +425,12 @@ class c_uint(c_integer, clike_int):
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_uint, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
 
 class clike_long:
@@ -573,16 +597,22 @@ class c_long(c_integer, clike_long):
         return self._arith(other, int.__xor__)
 
 
-    def __neg__(self) -> "c_longlong":
-        return c_longlong(-self.value)
-    def __pos__(self) -> "c_longlong":
-        return c_longlong(+self.value)
-    def __invert__(self) -> "c_longlong":
-        return c_longlong(~self.value)
+    def __neg__(self) -> "c_long":
+        return c_long(-self.value)
+    def __pos__(self) -> "c_long":
+        return c_long(+self.value)
+    def __invert__(self) -> "c_long":
+        return c_long(~self.value)
     def __str__(self) -> str:
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_long, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
     
     
@@ -718,16 +748,22 @@ class c_ulong(c_integer, clike_long):
         return self._arith(other, int.__xor__)
     
     
-    def __neg__(self) -> "c_longlong":
-        return c_longlong(-self.value)
-    def __pos__(self) -> "c_longlong":
-        return c_longlong(+self.value)
-    def __invert__(self) -> "c_longlong":
-        return c_longlong(~self.value)
+    def __neg__(self) -> "c_ulong":
+        return c_ulong(-self.value)
+    def __pos__(self) -> "c_ulong":
+        return c_ulong(+self.value)
+    def __invert__(self) -> "c_ulong":
+        return c_ulong(~self.value)
     def __str__(self) -> str:
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_ulong, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
 class clike_longlong:
     INT64_MAX = (1<<63) - 1
@@ -855,6 +891,12 @@ class c_longlong(c_integer, clike_longlong):
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_longlong, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
 class c_ulonglong(c_integer, clike_longlong):
 
@@ -905,31 +947,46 @@ class c_ulonglong(c_integer, clike_longlong):
         return str(self.value)
     def __repr__(self) -> str:
         return str(self.value)
-    
-class c_float(Protocol):
-    def __float__(self) -> float: ...
-    def __add__(self, other: "c_float") -> "c_float": ...
-    def __sub__(self, other: "c_float") -> "c_float": ...
-    def __mul__(self, other: "c_float") -> "c_float": ...
-    def __truediv__(self, other: "c_float") -> "c_float": ...
-    def __pow__(self, other: "c_float") -> "c_float": ...
-    def __neg__(self) -> "c_float": ...
-    def __pos__(self) -> "c_float": ...
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (c_ulonglong, int)):
+            return self.value == int(other)
+        return False
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
 
-class c_double(Protocol):
-    def __float__(self) -> float: ...
-    def __add__(self, other: "c_double") -> "c_double": ...
-    def __sub__(self, other: "c_double") -> "c_double": ...
-    def __mul__(self, other: "c_double") -> "c_double": ...
-    def __truediv__(self, other: "c_double") -> "c_double": ...
-    def __pow__(self, other: "c_double") -> "c_double": ...
-    def __neg__(self) -> "c_double": ...
-    def __pos__(self) -> "c_double": ...
+class c_float:
+    def __init__(self, value: float): self.value = value
+    def __float__(self) -> float: return self.value
+    def __add__(self, other: "c_float") -> "c_float": return c_float(self.value + float(other))
+    def __sub__(self, other: "c_float") -> "c_float": return c_float(self.value - float(other))
+    def __mul__(self, other: "c_float") -> "c_float": return c_float(self.value * float(other))
+    def __truediv__(self, other: "c_float") -> "c_float": return c_float(self.value / float(other))
+    def __pow__(self, other: "c_float") -> "c_float": return c_float(self.value ** float(other))
+    def __neg__(self) -> "c_float": return c_float(-self.value)
+    def __pos__(self) -> "c_float": return c_float(+self.value)
 
-class c_char(Protocol):
-    def __bytes__(self) -> bytes: ...
-    def __len__(self) -> int: ...
-    def decode(self, encoding: str = "utf-8") -> str: ...
+class c_double:
+    def __init__(self, value: float): self.value = value
+    def __float__(self) -> float: return self.value
+    def __add__(self, other: "c_double") -> "c_double": return c_double(self.value + float(other))
+    def __sub__(self, other: "c_double") -> "c_double": return c_double(self.value - float(other))
+    def __mul__(self, other: "c_double") -> "c_double": return c_double(self.value * float(other))
+    def __truediv__(self, other: "c_double") -> "c_double": return c_double(self.value / float(other))
+    def __pow__(self, other: "c_double") -> "c_double": return c_double(self.value ** float(other))
+    def __neg__(self) -> "c_double": return c_double(-self.value)
+    def __pos__(self) -> "c_double": return c_double(+self.value)
+
+class c_char(bytes):
+    def __init__(self, value: bytes):
+        if len(value) != 1:
+            raise ValueError("c_char must be a single byte")
+        self.value = value
+    def __bytes__(self) -> bytes: return self.value
+    def __len__(self) -> int: return 1
+    def decode(self, encoding: str = "utf-8", errors: str = "strict") -> str:
+        return self.value.decode(encoding, errors)
+    def __str__(self) -> str:
+        return self.value.decode()
 
 class c_bool:
     def __init__(self, value: "bool | clike_integer | py_object"):
