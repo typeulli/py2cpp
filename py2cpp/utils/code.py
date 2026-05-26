@@ -1,11 +1,12 @@
 from functools import wraps
 from pathlib import Path
-from typing import TypeVar, Callable, ParamSpec
+from typing import Generic, TypeVar, Callable, ParamSpec
 import os
 import sys
 import time
 
 T = TypeVar("T")
+U = TypeVar("U")
 def assert_type(value: object, type_: type[T]) -> T:
     assert isinstance(value, type_), f"Expected type {type_.__name__}, got {value!r}"
     return value
@@ -51,3 +52,32 @@ def get_cache_dir() -> Path:
     cache_dir = base / "py2cpp"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
+
+
+class pair(Generic[T, U]):
+    def __init__(self, first: T, second: U) -> None:
+        self.first = first
+        self.second = second
+ 
+class Optional(Generic[T]):
+    @classmethod
+    def empty(cls) -> "Optional[T]":
+        opt = Optional[T]()
+        opt.value = None
+        opt.exists = False
+        return opt
+    @classmethod
+    def of(cls, value: T) -> "Optional[T]":
+        opt = Optional[T]()
+        opt.value = value
+        opt.exists = True
+        return opt
+    def __init__(self) -> None:
+        self.value: T | None = None
+        self.exists: bool = False
+    def get(self) -> T:
+        if not self.exists or self.value is None:
+            raise ValueError("No value present")
+        return self.value
+    def present(self) -> bool:
+        return self.exists

@@ -4,14 +4,20 @@ from types import TracebackType
 T = TypeVar("T")
 N = TypeVar("N", bound=int)
 
+def c_do(_: str) -> None: return None
+def c_include(_: str) -> None: return None
+
 c_cast = cast
 c_static_cast = cast
+c_reinterpret_cast = cast
 
 class c_void: ...
 void: Final[c_void] = c_void()
 
+
 def c_exitcode(code: int) -> NoReturn:
     exit(code)
+
 
 class c_global:
     def __enter__(self) -> "c_global":
@@ -1021,8 +1027,11 @@ class c_bool:
     def __ne__(self, other: object) -> bool:
         return not self.__eq__(other)
 
+
 __all__ = [
-    "c_cast", "c_static_cast", "Literal", "Final",
+    "c_do", "c_include",
+    
+    "c_cast", "c_static_cast", "c_reinterpret_cast", "Literal", "Final",
     
     "c_void", "void",
     

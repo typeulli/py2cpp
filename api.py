@@ -186,4 +186,4 @@ async def websocket_endpoint(ws: WebSocket, doc_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=7001, reload=True)
+    uvicorn.run("api:app", host="0.0.0.0", port=7001, reload=True, proxy_headers=True, forwarded_allow_ips="*")

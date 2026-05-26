@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from ctypes import wintypes, CDLL
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from importlib.metadata import version
 from json import dump, load
@@ -16,7 +16,7 @@ from types import CodeType, FrameType, FunctionType, MethodType, ModuleType, Tra
 from typing import Any, Callable, Generic, Iterable, Literal, ParamSpec, TypeAlias, TypeVar, overload
 
 from py2cpp import setting as py2cpp_setting
-from py2cpp.core.compiler import Setting, py_2_cpp, FunctionTypeData, parse_type
+from py2cpp.core.compiler import CppnizeResult, Setting, py_2_cpp, FunctionTypeData, parse_type
 from py2cpp.utils.code import assert_type
 from py2cpp.utils.parse import indexMultiLine
 
@@ -111,13 +111,22 @@ CTYPE_MAP: dict[str, type] = {
     "PyObject*": ctypes.py_object,
 }
 
+@dataclass
+class CompileOption:
+    cxx: int = 17
+    o: int = 3
+    includes: list[str] = field(default_factory=list[str])
+
+    @property
+    def include_string(self) -> str:
+        return " ".join(f'/I"{include}"' for include in self.includes)
+
 @dataclass(frozen=True)
 class JitHeader:
     source: str
 
     system: str
-    cxx: int
-    o: int
+    option: CompileOption
 
     @property
     def hash(self):
@@ -125,7 +134,8 @@ class JitHeader:
         
         hasher = hashlib.md5()
 
-        hasher.update(f"{version('py2cpp')}:{self.system}:{self.cxx}:{self.o}".encode("utf-8"))
+        hasher.update(f"{version('py2cpp')}:{self.system}:{self.option.cxx}:{self.option.o}".encode("utf-8"))
+        for include in self.option.includes: hasher.update((":" + include).encode("utf-8"))
         hasher.update(source.encode("utf-8"))
         return hasher
     
@@ -274,12 +284,12 @@ class JitPydFunction(Generic[P, T], JitFunction[P, T]):
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> T:
         return self.cfunc(*args, **kwargs)
 
-def compile_dll(cxx: int, o: int, cpp_path: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def compile_dll(option: CompileOption, cpp_path: Path, output: Path) -> subprocess.CompletedProcess[str]:
     compile_command: list[str] = [
         py2cpp_setting.PATH_COMPILER,
-        f"-std=c++{cxx}",
+        f"-std=c++{option.cxx}",
         *FLAGS.get(py2cpp_setting.SYSTEM_NAME, []),
-        f"-O{o}",
+        f"-O{option.o}",
         str(cpp_path),
         "-o", str(output),
     ]
@@ -306,13 +316,12 @@ def find_vcvars64() -> Path:
 
     return vcvars
 
-def compile_pyd(cxx: int, o: int, cpp_path: Path, output: Path):
-
+def compile_pyd(option: CompileOption, cpp_path: Path, output: Path):
     cmd_line = (
         f'call "{find_vcvars64()}" && '
-        f'{py2cpp_setting.PATH_COMPILER_PYD} /std:c++{cxx} /LD '
-        f'{" /O2" if o >= 2 else "/Od"} '
-        f'/I"{py2cpp_setting.PATH_CPYTHON_INCLUDE}" "{cpp_path}" '
+        f'{py2cpp_setting.PATH_COMPILER_PYD} /std:c++{option.cxx} /LD '
+        f'{" /O2" if option.o >= 2 else "/Od"} '
+        f'/I"{py2cpp_setting.PATH_CPYTHON_INCLUDE}" "{cpp_path}" {option.include_string} '
         f'/link /LIBPATH:"{py2cpp_setting.PATH_CPYTHON_LIB}" python311.lib /OUT:"{output}"'
     )
 
@@ -324,20 +333,93 @@ def compile_pyd(cxx: int, o: int, cpp_path: Path, output: Path):
     
     return result
 
+
+def transform_cpplib(cpp_data: CppnizeResult, jitHeader: JitHeader, setting: Setting, func: Callable[..., Any]):
+    DELSPEC = "__declspec(dllexport)" if py2cpp_setting.SYSTEM_NAME == "windows" else "__attribute__((visibility(\"default\")))"
+
+    cpp_code = cpp_data.code
+        
+        
+    _type_fn = cpp_data.type_ctx.get_vartype(func.__name__)
+    assert type(_type_fn) == FunctionTypeData
+    type_fn: FunctionTypeData = _type_fn
+    type_return = parse_type(type_fn.return_type, cpp_data.type_ctx, cpp_data.state)
+    fn_code = type_return + " " + func.__name__ + "("
+    for i, arg in enumerate(type_fn.args):
+        arg_type = parse_type(arg[1], cpp_data.type_ctx, cpp_data.state)
+        fn_code += arg_type + " " + arg[0]
+        if i != len(type_fn.args) - 1:
+            fn_code += ", "
+    fn_code += ")"
+    
+    
+    
+    type_arguments: list[type] = []
+    for arg in type_fn.args:
+        arg_type = parse_type(arg[1], cpp_data.type_ctx, cpp_data.state)
+        type_arguments.append(CTYPE_MAP[arg_type])
+    
+    
+    _PY_MODE = type_return == "PyObject*"
+    if _PY_MODE:
+        assert all(argt[1].is_py_object for argt in type_fn.args), "All types must either be PyObject*, or none of them must be PyObject*."
+    else:
+        assert all(not argt[1].is_py_object for argt in type_fn.args), "All types must either be PyObject*, or none of them must be PyObject*."
+
+
+    assert fn_code in cpp_code
+    if _PY_MODE:
+        cpp_code = cpp_code.replace(
+                fn_code + " " + "{\n",
+                f"static PyObject* {func.__name__}(PyObject* self, PyObject* args) " + "{\n"
+                f"{setting.indent}PyObject " + ", ".join("*"+t[0] for t in type_fn.args) + ";\n"
+                f"{setting.indent}if (!PyArg_ParseTuple(args, \"{''.join('O' for _ in type_fn.args)}\", {', '.join('&'+t[0] for t in type_fn.args)})) {{\n"
+                f"{setting.indent*2}return nullptr;\n"
+                f"{setting.indent}}}\n",
+            1
+        )
+    else:
+        cpp_code = cpp_code.replace(
+            fn_code,
+            f"extern \"C\" {DELSPEC} {fn_code}" 
+        , 1)
+
+    
+    cpp_code = cpp_code[:cpp_code.rindex("int main()")].strip()
+    
+    
+    jitInfo = JitInfo(
+        header=jitHeader,
+        
+        type_return=CTYPE_MAP[type_return],
+        type_arguments=type_arguments,
+        py_mode=_PY_MODE
+    )
+
+
+    if _PY_MODE:
+        cpp_code += PY_MODULE_TEMPLATE.format(
+            name_fn=func.__name__,
+            name_struct=f"py2cpp_struct_{jitHeader.hash.hexdigest()}",
+            name_lib=f"py2cpp_lib_{jitHeader.hash.hexdigest()}",
+            description=repr((func.__doc__ or "") + "'")[:-2] + '"'
+        )
+    
+    return cpp_code, _PY_MODE, jitInfo
+
 _SourceObjectType: TypeAlias = (
     ModuleType | type[Any] | MethodType | FunctionType | TracebackType | FrameType | CodeType | Callable[..., Any]
 )
 @overload
-def jit(func: Callable[CP, CT], *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[CP, CT]: ...
+def jit(func: Callable[CP, CT], *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], option: CompileOption = CompileOption()) -> Callable[CP, CT]: ...
 @overload
-def jit(func: Callable[CP, CT], *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> JitFunction[CP, CT]: ...
+def jit(func: Callable[CP, CT], *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], option: CompileOption = CompileOption()) -> JitFunction[CP, CT]: ...
 @overload
-def jit(func: None = None, *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[[Callable[CP, CT]], Callable[CP, CT]]: ...
+def jit(func: None = None, *, pure: Literal[True] = True, ref: Iterable[_SourceObjectType] = [], option: CompileOption = CompileOption()) -> Callable[[Callable[CP, CT]], Callable[CP, CT]]: ...
 @overload
-def jit(func: None = None, *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[[Callable[CP, CT]], JitFunction[CP, CT]]: ...
-def jit(func: Callable[CP, CT] | None = None, *, pure: bool = True, ref: Iterable[_SourceObjectType] = [], cxx: int = 17, o: int = 3) -> Callable[CP, CT] | Callable[[Callable[CP, CT]], Callable[CP, CT]] | JitFunction[CP, CT] | Callable[[Callable[CP, CT]], JitFunction[CP, CT]]:
+def jit(func: None = None, *, pure: Literal[False], ref: Iterable[_SourceObjectType] = [], option: CompileOption = CompileOption()) -> Callable[[Callable[CP, CT]], JitFunction[CP, CT]]: ...
+def jit(func: Callable[CP, CT] | None = None, *, pure: bool = True, ref: Iterable[_SourceObjectType] = [], option: CompileOption = CompileOption()) -> Callable[CP, CT] | Callable[[Callable[CP, CT]], Callable[CP, CT]] | JitFunction[CP, CT] | Callable[[Callable[CP, CT]], JitFunction[CP, CT]]:
     def wrapper(func: Callable[CP, CT]) -> Callable[CP, CT]:
-        DELSPEC = "__declspec(dllexport)" if py2cpp_setting.SYSTEM_NAME == "windows" else "__attribute__((visibility(\"default\")))"
         setting = Setting()
         
         source = inspect.getsource(func)
@@ -350,91 +432,26 @@ def jit(func: Callable[CP, CT] | None = None, *, pure: bool = True, ref: Iterabl
             source=ast.unparse(ast.parse(source)),
             
             system=py2cpp_setting.SYSTEM_NAME,
-            cxx=cxx,
-            o=o
+            option=option
         )
         jitInfo_Test = JitInfo.load(jitHeader)
         if jitInfo_Test is not None:
             jitFn: JitFunction[CP, CT] = JitFunction[CP, CT].create(func, jitInfo_Test)
-            return jitFn.wrapper if pure else jitFn
+            if pure:
+                return jitFn.wrapper
+            return jitFn
         
-        cpp_data = py_2_cpp("from py2cpp.utils.header import *\n" + source, path=f"<jit:{func.__name__}>", setting=setting)
-        cpp_code = cpp_data.code
-        
-        
-        
-        
-        _type_fn = cpp_data.type_ctx.get_vartype(f"{func.__name__}")
-        assert type(_type_fn) == FunctionTypeData
-        type_fn: FunctionTypeData = _type_fn
-        type_return = parse_type(type_fn.return_type, cpp_data.type_ctx, cpp_data.state)
-        fn_code = type_return + " " + func.__name__ + "("
-        for i, arg in enumerate(type_fn.args):
-            arg_type = parse_type(arg[1], cpp_data.type_ctx, cpp_data.state)
-            fn_code += arg_type + " " + arg[0]
-            if i != len(type_fn.args) - 1:
-                fn_code += ", "
-        fn_code += ")"
-        
-        
-        
-        type_arguments: list[type] = []
-        for arg in type_fn.args:
-            arg_type = parse_type(arg[1], cpp_data.type_ctx, cpp_data.state)
-            type_arguments.append(CTYPE_MAP[arg_type])
-        
-        
-        _PY_MODE = type_return == "PyObject*"
-        if _PY_MODE:
-            assert all(argt[1].is_py_object for argt in type_fn.args), "All types must either be PyObject*, or none of them must be PyObject*."
-        else:
-            assert all(not argt[1].is_py_object for argt in type_fn.args), "All types must either be PyObject*, or none of them must be PyObject*."
-
-
-        assert fn_code in cpp_code
-        if _PY_MODE:
-            cpp_code = cpp_code.replace(
-                    fn_code + " " + "{\n",
-                    f"static PyObject* {func.__name__}(PyObject* self, PyObject* args) " + "{\n"
-                    f"{setting.indent}PyObject " + ", ".join("*"+t[0] for t in type_fn.args) + ";\n"
-                    f"{setting.indent}if (!PyArg_ParseTuple(args, \"{''.join('O' for _ in type_fn.args)}\", {', '.join('&'+t[0] for t in type_fn.args)})) {{\n"
-                    f"{setting.indent*2}return nullptr;\n"
-                    f"{setting.indent}}}\n",
-                1
-            )
-        else:
-            cpp_code = cpp_code.replace(
-                fn_code,
-                f"extern \"C\" {DELSPEC} {fn_code}" 
-            , 1)
+        cpp_data = py_2_cpp("from py2cpp.api import *\n" + source, path=f"<jit:{func.__name__}>", setting=setting)
+        cpp_code, _PY_MODE, jitInfo = transform_cpplib(cpp_data, jitHeader, setting, func)
 
         
-        cpp_code = cpp_code[:cpp_code.rindex("int main()")].strip()
-
-        
-        jitInfo = JitInfo(
-            header=jitHeader,
-            
-            type_return=CTYPE_MAP[type_return],
-            type_arguments=type_arguments,
-            py_mode=_PY_MODE
-        )
-        
-        
-        if _PY_MODE:
-            cpp_code += PY_MODULE_TEMPLATE.format(
-                name_fn=func.__name__,
-                name_struct=f"py2cpp_struct_{jitHeader.hash.hexdigest()}",
-                name_lib=f"py2cpp_lib_{jitHeader.hash.hexdigest()}",
-                description=repr((func.__doc__ or "") + "'")[:-2] + '"'
-            )
 
 
 
         output = jitInfo.path
         cpp_path = output.with_suffix(".cpp")
         cpp_path.write_text(cpp_code, encoding="utf-8")
-        result = (compile_pyd if _PY_MODE else compile_dll)(cxx, o, cpp_path, output)
+        result = (compile_pyd if _PY_MODE else compile_dll)(option, cpp_path, output)
         cpp_path.unlink(missing_ok=True)
         if result.returncode != 0:
             error = "Compilation failed:"
@@ -448,7 +465,9 @@ def jit(func: Callable[CP, CT] | None = None, *, pure: bool = True, ref: Iterabl
         jitFn = JitFunction[CP, CT].create(func, jitInfo)
         jitInfo.save_meta()
         
-        return jitFn.wrapper if pure else jitFn
+        if pure:
+            return jitFn.wrapper
+        return jitFn
     
     if func is not None:
         return wrapper(func)

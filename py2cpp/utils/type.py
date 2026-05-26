@@ -9,23 +9,34 @@ from mypy import api
 
 GenericData: TypeAlias = "list[TypeData | GenericData]"
 
+_BUILTIN_SHORT_NAMES = {
+    "list", "tuple", "dict", "set", "frozenset",
+    "int", "float", "str", "bool", "complex",
+    "bytes", "bytearray",
+}
+
 class TypeData:
     def __init__(self, type_: str, generics: "GenericData | None" = None):
         self.type_ = type_
         self.generics = generics if generics is not None else []
-    
+
     @classmethod
     def from_str(cls, type_str: str, *, force_typed: bool = True) -> "TypeData":
         if type_str == "Any":
             assert not force_typed, "TypeData cannot be 'Any' when force_typed."
             type_str = "py2cpp.py_object"
-        
+
         if "[" not in type_str:
-            return cls(type_=type_str, generics=[])
-        
+            typename = type_str
+            if typename in _BUILTIN_SHORT_NAMES:
+                typename = "builtins." + typename
+            return cls(type_=typename, generics=[])
+
         typename = type_str[:type_str.index("[")]
         if not ("[" in type_str and type_str.endswith("]")):
             return cls(type_=type_str, generics=[])
+        if typename in _BUILTIN_SHORT_NAMES:
+            typename = "builtins." + typename
         generics_str = type_str[type_str.index("[")+1:-1]
         generics: GenericData = []
         depth = 0
@@ -276,7 +287,7 @@ def parse_types(text: str, path_scripts: list[str] = [], *, force_typed: bool = 
     new_tree = ast.parse(new_code)
     new_code_lines = new_code.splitlines()
     
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
         f.write(new_code)
         f.close()
         os.environ["MYPYPATH"] = os.pathsep.join(path_scripts)

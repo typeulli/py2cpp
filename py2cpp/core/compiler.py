@@ -63,7 +63,7 @@ CStdLib = Builtins("#include <cstdlib>", inline=True)
 Tuple = Builtins("#include <tuple>", inline=True)
 CMath = Builtins("#include <cmath>", inline=True)
 Complex = Builtins("#include <complex>", inline=True)
-
+Execution = Builtins("#include <execution>", inline=True)
 Python = Builtins("#include <Python.h>", inline=True)
 
 NameDict: dict[str, tuple[Builtins, str]] = {
@@ -372,21 +372,21 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
             raise TypeError(f"Unsupported at eval_type: attr for '{value_type.type_}'")
         case _:
             raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
-    raise RuntimeError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
+    raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
 type_alias = {
-    "py2cpp_header.c_int": "int",
-    "py2cpp_header.c_uint": "unsigned int",
-    "py2cpp_header.c_short": "short",
-    "py2cpp_header.c_ushort": "unsigned short",
-    "py2cpp_header.c_long": "long",
-    "py2cpp_header.c_ulong": "unsigned long",
-    "py2cpp_header.c_longlong": "long long",
-    "py2cpp_header.c_ulonglong": "unsigned long long",
-    "py2cpp_header.c_float": "float",
-    "py2cpp_header.c_double": "double",
-    "py2cpp_header.c_char": "char",
-    "py2cpp_header.c_bool": "bool",
-    "py2cpp_header.c_void": "void",
+    "py2cpp.api.c_int": "int",
+    "py2cpp.api.c_uint": "unsigned int",
+    "py2cpp.api.c_short": "short",
+    "py2cpp.api.c_ushort": "unsigned short",
+    "py2cpp.api.c_long": "long",
+    "py2cpp.api.c_ulong": "unsigned long",
+    "py2cpp.api.c_longlong": "long long",
+    "py2cpp.api.c_ulonglong": "unsigned long long",
+    "py2cpp.api.c_float": "float",
+    "py2cpp.api.c_double": "double",
+    "py2cpp.api.c_char": "char",
+    "py2cpp.api.c_bool": "bool",
+    "py2cpp.api.c_void": "void",
     "builtins.int": "long",
     "builtins.float": "double",
     "builtins.bool": "bool",
@@ -487,13 +487,13 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                         assert type(type_str) == ast.Constant and type(type_str.value) == str
                         parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
                         return f"({parsed_type})({unwrap_paren(__dfs_stmt(val))})"
-                    case "c_static_cast":
+                    case "c_static_cast" | "c_reinterpret_cast":
                         assert len(node.args) == 2
                         type_str = node.args[0]
                         val = node.args[1]
                         assert type(type_str) == ast.Constant and type(type_str.value) == str
                         parsed_type = parse_type(TypeData.from_str(type_str.value), type_ctx, state)
-                        return f"static_cast<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
+                        return f"{func.id.replace('c_', '', 1)}<{parsed_type}>({unwrap_paren(__dfs_stmt(val))})"
                     case "c_short" | "c_ushort" | "c_int" | "c_uint" | "c_long" | "c_ulong" | "c_longlong" | "c_ulonglong":
                         if len(node.args) != 1: raise SyntaxError(f"{func.id} requires exactly one argument")
                         arg = node.args[0]
@@ -527,6 +527,17 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                                 return "(" + unwrap_paren(__dfs_stmt(arg)) + " != 0)"
                             case _:
                                 raise NotImplementedError(f"Unsupported argument type for c_bool(): {arg_type.type_}")
+                    case "c_transform_par_unseq":
+                        if len(node.args) != 3: raise SyntaxError("c_transform_par_unseq requires exactly three arguments")
+                        src = node.args[0]
+                        tgt = node.args[1]
+                        func_arg = node.args[2]
+                        state.used_builtins.add(Execution)
+                        return state.get_name("transform") + "(std::execution::par_unseq, {src}.begin(), {src}.end(), {tgt}.begin(), {func})".format(
+                            src=unwrap_paren(__dfs_stmt(src)),
+                            tgt=unwrap_paren(__dfs_stmt(tgt)),
+                            func=unwrap_paren(__dfs_stmt(func_arg))
+                        )
                     case "py_object":
                         if len(node.args) != 1: raise SyntaxError("py_object requires exactly one argument")
                         arg = node.args[0]
@@ -609,6 +620,32 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                                 return "std::stod(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
                             case _:
                                 raise NotImplementedError(f"Unsupported type for float(): {target_type.type_}")
+                    case "abs":
+                        if len(node.args) != 1: raise SyntaxError("abs requires exactly one argument")
+                        arg = node.args[0]
+                        arg_type = eval_type(arg, type_ctx, state, path)
+                        match arg_type.type_:
+                            case "builtins.int":
+                                return "std::abs(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case "builtins.float":
+                                state.used_builtins.add(CMath)
+                                return "std::fabs(" + unwrap_paren(__dfs_stmt(arg)) + ")"
+                            case _:
+                                raise NotImplementedError(f"Unsupported type for abs(): {arg_type.type_}")
+                    case "len":
+                        if len(node.args) != 1: raise SyntaxError("len requires exactly one argument")
+                        arg = node.args[0]
+                        arg_type = eval_type(arg, type_ctx, state, path)
+                        match arg_type.type_:
+                            case "builtins.list":
+                                return unwrap_paren(__dfs_stmt(arg)) + ".size()"
+                            case _:
+                                raise NotImplementedError(f"Unsupported type for len(): {arg_type.type_}")
+                    case "c_vector_resize":
+                        if len(node.args) != 2: raise SyntaxError("c_vector_resize requires exactly two arguments")
+                        vector = node.args[0]
+                        size = node.args[1]
+                        return unwrap_paren(__dfs_stmt(vector)) + ".resize(" + unwrap_paren(__dfs_stmt(size)) + ")"
                     case "divmod":
                         if len(node.args) != 2: raise SyntaxError("divmod requires exactly two arguments")
                         dividend = unwrap_paren(__dfs_stmt(node.args[0]))
@@ -809,7 +846,7 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
         case _:
             raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
-    raise RuntimeError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
+    raise NotImplementedError(f"Unsupported AST node type: {type(node)} {ast.dump(node)}")
 
 def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth: int = 0, path: str = "") -> str:
 
@@ -1056,10 +1093,25 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                 val, extra_pre, extra_post = __dfs_stmt(call_expr.args[0])
                 if extra_pre != "": result += extra_pre + "\n"
                 result += "return " + val + ";"
+            elif type(call_expr) == ast.Call and type(call_expr.func) == ast.Name and call_expr.func.id == "c_include":
+                if len(call_expr.args) != 1: raise SyntaxError("c_include requires exactly one argument")
+                __arg = call_expr.args[0]
+                assert type(__arg) == ast.Constant and type(__arg.value) == str
+                assert re.match(r'^<.*>$|^".*"$', __arg.value), "c_include argument must be enclosed in <> or \"\""
+                state.used_builtins.add(Builtins(f"#include {__arg.value}", inline=True))
+                
+                extra_post = ""
+            elif type(call_expr) == ast.Call and type(call_expr.func) == ast.Name and call_expr.func.id == "c_do":
+                if len(call_expr.args) != 1: raise SyntaxError("c_do requires exactly one argument")
+                __arg = call_expr.args[0]
+                assert type(__arg) == ast.Constant and type(__arg.value) == str
+                result += __arg.value.strip()
+                
+                extra_post = ""
             else:
                 val, extra_pre, extra_post = __dfs_stmt(call_expr)
                 if extra_pre != "": result += extra_pre + "\n"
-                result += val + ";"
+                if val: result += val + ";"
 
             if extra_post != "": result += "\n" + extra_post
             result += comments_now_code
@@ -1130,13 +1182,14 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                     if step == "-1": exp_change = "--" + target.id
                     
                     state.used_builtins.add(CStdDef)
-                    result += "for (" + ("size_t " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + exp_change + ") {\n"
+                    result += "for (" + ("long long " if loc not in state.defined else "") + target.id + " = " + start + "; " + target.id + " < " + end + "; " + exp_change + ") {\n"
                 else:
                     val, extra_pre, extra_post = __dfs_stmt(iter)
                     if extra_pre != "": result += extra_pre + "\n"
                     result += "for (auto " + target.id + " : " + val + ") {\n"
             else:
                 raise NotImplementedError("Only simple variable as for loop target is supported")
+            type_ctx.type_dict[path + target.id] = TypeData("py2cpp.api.c_longlong")
             for stmt in body:
                 result += __pad(dfs(stmt, type_ctx, state, depth + 1, path)) + "\n"
             result += "}"
