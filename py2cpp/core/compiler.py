@@ -65,6 +65,20 @@ CMath = Builtins("#include <cmath>", inline=True)
 Complex = Builtins("#include <complex>", inline=True)
 Execution = Builtins("#include <execution>", inline=True)
 Python = Builtins("#include <Python.h>", inline=True)
+Random = Builtins("#include <random>", inline=True)
+RandomEngine = Builtins(
+    "static std::mt19937 __py2c_rng(std::random_device{}());\n",
+    inline=True,
+    requires=[Random]
+)
+Numeric = Builtins("#include <numeric>", inline=True)
+Chrono = Builtins("#include <chrono>", inline=True)
+Thread = Builtins("#include <thread>", inline=True)
+CTime = Builtins("#include <ctime>", inline=True)
+FStream = Builtins("#include <fstream>", inline=True)
+SStream = Builtins("#include <sstream>", inline=True)
+UnorderedMap = Builtins("#include <unordered_map>", inline=True)
+UnorderedSet = Builtins("#include <unordered_set>", inline=True)
 
 NameDict: dict[str, tuple[Builtins, str]] = {
     "string": (String, "std::string"),
@@ -83,6 +97,27 @@ NameDict: dict[str, tuple[Builtins, str]] = {
     "complex": (Complex, "std::complex"),
     "@python": (Python, ""),
 }
+
+MATH_FUNCS: dict[str, str] = {
+    "sqrt": "std::sqrt", "sin": "std::sin", "cos": "std::cos", "tan": "std::tan",
+    "asin": "std::asin", "acos": "std::acos", "atan": "std::atan", "atan2": "std::atan2",
+    "sinh": "std::sinh", "cosh": "std::cosh", "tanh": "std::tanh",
+    "log": "std::log", "log2": "std::log2", "log10": "std::log10",
+    "exp": "std::exp", "pow": "std::pow",
+    "floor": "std::floor", "ceil": "std::ceil", "trunc": "std::trunc",
+    "fabs": "std::fabs", "fmod": "std::fmod",
+    "gcd": "std::gcd",
+}
+MATH_CONSTS: dict[str, str] = {
+    "pi": "3.14159265358979323846",
+    "e": "2.71828182845904523536",
+    "inf": "std::numeric_limits<double>::infinity()",
+    "nan": "std::numeric_limits<double>::quiet_NaN()",
+    "tau": "6.28318530717958647692",
+}
+Limits = Builtins("#include <limits>", inline=True)
+
+TIME_FUNCS: set[str] = {"time", "sleep", "perf_counter", "monotonic"}
 
 @dataclass
 class DefaultTypesSetting:
@@ -135,6 +170,13 @@ class State:
     used_builtins: set[Builtins] = field(default_factory=lambda: set[Builtins]())
     used_tempids: set[str] = field(default_factory=lambda: set[str]())
     setting: Setting = field(default_factory=Setting)
+    imports_from_random: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    imports_random_module: set[str] = field(default_factory=lambda: set[str]())
+    imports_from_math: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    imports_math_module: set[str] = field(default_factory=lambda: set[str]())
+    imports_from_time: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    imports_time_module: set[str] = field(default_factory=lambda: set[str]())
+    file_vars: dict[str, str] = field(default_factory=lambda: dict[str, str]())
 
     def get_tempid(self) -> str:
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
@@ -271,6 +313,240 @@ if ({_tmp1} != 0) {{ return nullptr; }}
     require_names=["@python"]
 )
 
+Template_Randint = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::uniform_int_distribution<long>({a}, {b})(__py2c_rng)",
+    require_vars=["a", "b"]
+)
+
+Template_Randrange1 = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::uniform_int_distribution<long>(0, ({stop}) - 1)(__py2c_rng)",
+    require_vars=["stop"]
+)
+
+Template_Randrange2 = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::uniform_int_distribution<long>({start}, ({stop}) - 1)(__py2c_rng)",
+    require_vars=["start", "stop"]
+)
+
+Template_Randrange3 = ScriptTemplateSimple(
+    pre="""
+long {_start} = {start};
+long {_stop} = {stop};
+long {_step} = {step};
+""",
+    result_expr="({_start} + std::uniform_int_distribution<long>(0, ({_stop} - {_start} - ({_step} > 0 ? 1 : -1)) / {_step})(__py2c_rng) * {_step})",
+    require_vars=["start", "stop", "step"]
+)
+
+Template_Shuffle = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::shuffle({v}.begin(), {v}.end(), __py2c_rng)",
+    require_vars=["v"]
+)
+
+Template_Sorted = ScriptTemplateSimple(
+    pre="""
+auto {_tmp1} = {iterable};
+std::sort({_tmp1}.begin(), {_tmp1}.end());
+""",
+    result_expr="{_tmp1}",
+    require_vars=["iterable"]
+)
+
+Template_Sorted_Reverse = ScriptTemplateSimple(
+    pre="""
+auto {_tmp1} = {iterable};
+std::sort({_tmp1}.begin(), {_tmp1}.end(), std::greater<>());
+""",
+    result_expr="{_tmp1}",
+    require_vars=["iterable"]
+)
+
+Template_Reversed = ScriptTemplateSimple(
+    pre="""
+auto {_tmp1} = {iterable};
+std::reverse({_tmp1}.begin(), {_tmp1}.end());
+""",
+    result_expr="{_tmp1}",
+    require_vars=["iterable"]
+)
+
+Template_Round_NDigits = ScriptTemplateSimple(
+    pre="""
+double {_factor} = std::pow(10.0, {ndigits});
+""",
+    result_expr="(std::round(({x}) * {_factor}) / {_factor})",
+    require_vars=["x", "ndigits"]
+)
+
+Template_TimeSleep = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::this_thread::sleep_for(std::chrono::duration<double>({seconds}))",
+    require_vars=["seconds"]
+)
+
+Template_PerfCounter = ScriptTemplateSimple(
+    pre="",
+    result_expr="std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count()"
+)
+
+Template_Time = ScriptTemplateSimple(
+    pre="",
+    result_expr="static_cast<double>(std::time(nullptr))"
+)
+
+Template_FileRead = ScriptTemplateSimple(
+    pre="""
+std::stringstream {_tmp1};
+{_tmp1} << {file}.rdbuf();
+""",
+    result_expr="{_tmp1}.str()",
+    require_vars=["file"]
+)
+
+Template_FileReadline = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1};
+std::getline({file}, {_tmp1});
+""",
+    result_expr="{_tmp1}",
+    require_vars=["file"]
+)
+
+Template_StrSplit = ScriptTemplateSimple(
+    pre="""
+std::vector<std::string> {_tmp1};
+{{
+    const std::string& {_s} = {string};
+    const std::string& {_d} = {sep};
+    size_t {_a} = 0, {_p};
+    while (({_p} = {_s}.find({_d}, {_a})) != std::string::npos) {{
+        {_tmp1}.push_back({_s}.substr({_a}, {_p} - {_a}));
+        {_a} = {_p} + {_d}.size();
+    }}
+    {_tmp1}.push_back({_s}.substr({_a}));
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string", "sep"]
+)
+
+Template_StrSplitWs = ScriptTemplateSimple(
+    pre="""
+std::vector<std::string> {_tmp1};
+{{
+    std::stringstream {_ss}({string});
+    std::string {_it};
+    while ({_ss} >> {_it}) {_tmp1}.push_back({_it});
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string"]
+)
+
+Template_StrJoin = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1};
+{{
+    const auto& {_v} = {iterable};
+    const std::string& {_sep} = {sep};
+    for (size_t {_i} = 0; {_i} < {_v}.size(); ++{_i}) {{
+        if ({_i} > 0) {_tmp1} += {_sep};
+        {_tmp1} += {_v}[{_i}];
+    }}
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["sep", "iterable"]
+)
+
+Template_StrReplace = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1} = {string};
+{{
+    const std::string& {_o} = {old};
+    const std::string& {_n} = {new_};
+    size_t {_p} = 0;
+    while (({_p} = {_tmp1}.find({_o}, {_p})) != std::string::npos) {{
+        {_tmp1}.replace({_p}, {_o}.size(), {_n});
+        {_p} += {_n}.size();
+    }}
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string", "old", "new_"]
+)
+
+Template_StrStrip = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1};
+{{
+    const std::string& {_s} = {string};
+    auto {_a} = {_s}.find_first_not_of(" \\t\\n\\r\\f\\v");
+    auto {_b} = {_s}.find_last_not_of(" \\t\\n\\r\\f\\v");
+    {_tmp1} = ({_a} == std::string::npos) ? std::string() : {_s}.substr({_a}, {_b} - {_a} + 1);
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string"]
+)
+
+Template_StrLStrip = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1};
+{{
+    const std::string& {_s} = {string};
+    auto {_a} = {_s}.find_first_not_of(" \\t\\n\\r\\f\\v");
+    {_tmp1} = ({_a} == std::string::npos) ? std::string() : {_s}.substr({_a});
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string"]
+)
+
+Template_StrRStrip = ScriptTemplateSimple(
+    pre="""
+std::string {_tmp1};
+{{
+    const std::string& {_s} = {string};
+    auto {_b} = {_s}.find_last_not_of(" \\t\\n\\r\\f\\v");
+    {_tmp1} = ({_b} == std::string::npos) ? std::string() : {_s}.substr(0, {_b} + 1);
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string"]
+)
+
+Template_StrCount = ScriptTemplateSimple(
+    pre="""
+long {_tmp1} = 0;
+{{
+    const std::string& {_s} = {string};
+    const std::string& {_sub} = {sub};
+    if (!{_sub}.empty()) {{
+        size_t {_p} = 0;
+        while (({_p} = {_s}.find({_sub}, {_p})) != std::string::npos) {{
+            ++{_tmp1};
+            {_p} += {_sub}.size();
+        }}
+    }}
+}}
+""",
+    result_expr="{_tmp1}",
+    require_vars=["string", "sub"]
+)
+
+Template_Slice_List = ScriptTemplateSimple(
+    pre="""
+auto {_tmp1} = {iterable};
+""",
+    result_expr="std::vector<typename std::decay<decltype({_tmp1})>::type::value_type>({_tmp1}.begin() + ({lo}), {_tmp1}.begin() + ({hi}))",
+    require_vars=["iterable", "lo", "hi"]
+)
+
 class ScriptTemplateClsInput(ScriptTemplate):
     def __init__(self) -> None:
         self.Template_Input_GetValue = ScriptTemplateSimple(
@@ -316,6 +592,15 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
             return type_
         case ast.Call:
             assert type(expr) == ast.Call
+            if type(expr.func) == ast.Attribute and type(expr.func.value) == ast.Name:
+                base = expr.func.value.id
+                attr = expr.func.attr
+                if base in state.imports_math_module and attr in MATH_FUNCS:
+                    return TypeData(type_="builtins.float")
+                if base in state.imports_time_module and attr in TIME_FUNCS:
+                    return TypeData(type_="builtins.float")
+                if base in state.imports_random_module and attr in ("randint", "randrange"):
+                    return TypeData(type_="builtins.int")
             assert type(expr.func) == ast.Name
             match expr.func.id:
                 case "int": return TypeData(type_="builtins.int")
@@ -328,6 +613,12 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
                 case "py_object":
                     return TypeData(type_="py2cpp.py_object")
                 case _:
+                    if expr.func.id in state.imports_from_math and state.imports_from_math[expr.func.id] in MATH_FUNCS:
+                        return TypeData(type_="builtins.float")
+                    if expr.func.id in state.imports_from_time and state.imports_from_time[expr.func.id] in TIME_FUNCS:
+                        return TypeData(type_="builtins.float")
+                    if expr.func.id in state.imports_from_random and state.imports_from_random[expr.func.id] in ("randint", "randrange"):
+                        return TypeData(type_="builtins.int")
                     func = eval_type(expr.func, type_ctx, state, path)
                     if func.is_py_object:
                         return TypeData(type_="py2cpp.py_object")
@@ -361,6 +652,10 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
             return TypeData(type_="builtins.int")
         case ast.Attribute:
             assert type(expr) == ast.Attribute
+            if (type(expr.value) == ast.Name
+                and expr.value.id in state.imports_math_module
+                and expr.attr in MATH_CONSTS):
+                return TypeData(type_="builtins.float")
             value_type = eval_type(expr.value, type_ctx, state, path)
             if value_type.is_py_object:
                 return TypeData(type_="py2cpp.py_object")
@@ -370,6 +665,25 @@ def eval_type(expr: ast.expr, type_ctx: TypeContext, state: State, path: str = "
                     return struct_def.fields[expr.attr].type_
                 raise TypeError(f"Attribute '{expr.attr}' not found in struct '{value_type.type_}'")
             raise TypeError(f"Unsupported at eval_type: attr for '{value_type.type_}'")
+        case ast.Subscript:
+            assert type(expr) == ast.Subscript
+            value_type = eval_type(expr.value, type_ctx, state, path)
+            if type(expr.slice) == ast.Slice:
+                return value_type
+            if value_type.type_ == "builtins.str":
+                return TypeData(type_="builtins.str")
+            if value_type.type_.startswith("builtins.list") and len(value_type.generics) >= 1:
+                gen = value_type.generics[0]
+                if type(gen) == TypeData:
+                    return gen
+            if value_type.type_.startswith("builtins.dict") and len(value_type.generics) >= 2:
+                gen = value_type.generics[1]
+                if type(gen) == TypeData:
+                    return gen
+            return value_type
+        case ast.UnaryOp:
+            assert type(expr) == ast.UnaryOp
+            return eval_type(expr.operand, type_ctx, state, path)
         case _:
             raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
     raise NotImplementedError(f"Unsupported AST node type for eval_type: {type(expr)} {ast.dump(expr)}")
@@ -413,6 +727,21 @@ def parse_type(data: TypeData, type_ctx: TypeContext, state: State) -> str:
         assert type(vector_type) == TypeData
         return state.get_name("vector") + "<" + __parse_type(vector_type) + ">"
 
+    if data.type_.startswith("builtins.dict"):
+        assert len(data.generics) == 2
+        k_type = data.generics[0]
+        v_type = data.generics[1]
+        assert type(k_type) == TypeData and type(v_type) == TypeData
+        state.used_builtins.add(UnorderedMap)
+        return "std::unordered_map<" + __parse_type(k_type) + ", " + __parse_type(v_type) + ">"
+
+    if data.type_.startswith("builtins.set"):
+        assert len(data.generics) == 1
+        v_type = data.generics[0]
+        assert type(v_type) == TypeData
+        state.used_builtins.add(UnorderedSet)
+        return "std::unordered_set<" + __parse_type(v_type) + ">"
+
     if data.type_.startswith("tuple"):
         return state.get_name("tuple") + "<" + ", ".join(__parse_type(assert_type(t, TypeData)) for t in data.generics) + ">"
 
@@ -440,6 +769,91 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
     def __dfs_stmt(node: ast.expr) -> str:
         return dfs_stmt(node, type_ctx, stmt_state, path)
+
+    def __emit_random_call(func_name: str, args: list[ast.expr]) -> str:
+        state.used_builtins.add(RandomEngine)
+        match func_name:
+            case "randint":
+                if len(args) != 2: raise SyntaxError("random.randint requires 2 arguments")
+                return Template_Randint.format(stmt_state,
+                    a=unwrap_paren(__dfs_stmt(args[0])),
+                    b=unwrap_paren(__dfs_stmt(args[1])))
+            case "randrange":
+                if len(args) == 1:
+                    return Template_Randrange1.format(stmt_state,
+                        stop=unwrap_paren(__dfs_stmt(args[0])))
+                if len(args) == 2:
+                    return Template_Randrange2.format(stmt_state,
+                        start=unwrap_paren(__dfs_stmt(args[0])),
+                        stop=unwrap_paren(__dfs_stmt(args[1])))
+                if len(args) == 3:
+                    return Template_Randrange3.format(stmt_state,
+                        start=unwrap_paren(__dfs_stmt(args[0])),
+                        stop=unwrap_paren(__dfs_stmt(args[1])),
+                        step=unwrap_paren(__dfs_stmt(args[2])))
+                raise SyntaxError("random.randrange requires 1-3 arguments")
+            case "shuffle":
+                if len(args) != 1: raise SyntaxError("random.shuffle requires 1 argument")
+                state.used_builtins.add(Algorithm)
+                return Template_Shuffle.format(stmt_state, v=unwrap_paren(__dfs_stmt(args[0])))
+        raise NotImplementedError(f"random.{func_name} is not supported")
+
+    def __emit_math_call(func_name: str, args: list[ast.expr]) -> str:
+        if func_name not in MATH_FUNCS:
+            raise NotImplementedError(f"math.{func_name} is not supported")
+        state.used_builtins.add(CMath)
+        cpp_name = MATH_FUNCS[func_name]
+        args_str = ", ".join(unwrap_paren(__dfs_stmt(a)) for a in args)
+        return f"{cpp_name}({args_str})"
+
+    def __emit_math_const(const_name: str) -> str:
+        if const_name not in MATH_CONSTS:
+            raise NotImplementedError(f"math.{const_name} is not supported")
+        if const_name in ("inf", "nan"):
+            state.used_builtins.add(Limits)
+        return MATH_CONSTS[const_name]
+
+    def __emit_time_call(func_name: str, args: list[ast.expr]) -> str:
+        match func_name:
+            case "time":
+                state.used_builtins.add(CTime)
+                return Template_Time.format(stmt_state)
+            case "sleep":
+                if len(args) != 1: raise SyntaxError("time.sleep requires 1 argument")
+                state.used_builtins.add(Chrono)
+                state.used_builtins.add(Thread)
+                return Template_TimeSleep.format(stmt_state,
+                    seconds=unwrap_paren(__dfs_stmt(args[0])))
+            case "perf_counter" | "monotonic":
+                state.used_builtins.add(Chrono)
+                return Template_PerfCounter.format(stmt_state)
+        raise NotImplementedError(f"time.{func_name} is not supported")
+
+    def __emit_file_open(node: ast.Call) -> str:
+        if len(node.args) < 1: raise SyntaxError("open requires at least 1 argument")
+        path_arg = unwrap_paren(__dfs_stmt(node.args[0]))
+        mode = "r"
+        if len(node.args) >= 2:
+            mode_node = node.args[1]
+            if type(mode_node) == ast.Constant and type(mode_node.value) == str:
+                mode = mode_node.value
+        for kwd in node.keywords:
+            if kwd.arg == "mode" and type(kwd.value) == ast.Constant and type(kwd.value.value) == str:
+                mode = kwd.value.value
+        state.used_builtins.add(FStream)
+        cls = "std::ofstream" if ("w" in mode or "a" in mode) else "std::ifstream"
+        flags = ""
+        if "a" in mode:
+            flags = ", std::ios::app"
+        if "b" in mode:
+            flags += ", std::ios::binary"
+        if direct.type_ == "assign":
+            var_name = direct.value
+            state.file_vars[var_name] = var_name
+            state.defined[path + var_name] = True
+            stmt_state.extra_codes_pre.append(f"{cls} {var_name}({path_arg}{flags});")
+            return ""
+        raise SyntaxError("open() must be used in an assignment or 'with' statement")
     
     match type(node):
         case ast.Constant:
@@ -454,6 +868,10 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.Attribute:
             assert type(node) == ast.Attribute
+            if (type(node.value) == ast.Name
+                and node.value.id in state.imports_math_module
+                and node.attr in MATH_CONSTS):
+                return __emit_math_const(node.attr)
             type_data = eval_type(node.value, type_ctx, state, path)
             if direct.type_ != "assign" and type_data.is_py_object:
                 get_attr = Template_Python_Getattr.format(
@@ -469,6 +887,18 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.List:
             assert type(node) == ast.List
+            return "{" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + "}"
+
+        case ast.Dict:
+            assert type(node) == ast.Dict
+            pairs: list[str] = []
+            for k, v in zip(node.keys, node.values):
+                assert k is not None
+                pairs.append("{" + unwrap_paren(__dfs_stmt(k)) + ", " + unwrap_paren(__dfs_stmt(v)) + "}")
+            return "{" + ", ".join(pairs) + "}"
+
+        case ast.Set:
+            assert type(node) == ast.Set
             return "{" + ", ".join(unwrap_paren(__dfs_stmt(elt)) for elt in node.elts) + "}"
 
         case ast.Tuple:
@@ -654,9 +1084,77 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                     case "exit":
                         state.used_builtins.add(CStdLib)
                         return "std::exit(" + unwrap_paren(__dfs_stmt(node.args[0])) + ")"
+                    case "min" | "max":
+                        state.used_builtins.add(Algorithm)
+                        op = "std::min" if func.id == "min" else "std::max";
+                        if len(node.args) == 0:
+                            raise SyntaxError(f"{func.id} requires at least one argument")
+                        if len(node.args) == 1:
+                            arg = node.args[0]
+                            arg_str = unwrap_paren(__dfs_stmt(arg))
+                            elem_op = "std::min_element" if func.id == "min" else "std::max_element"
+                            return f"(*{elem_op}({arg_str}.begin(), {arg_str}.end()))"
+                        return f"{op}({{" + ", ".join(unwrap_paren(__dfs_stmt(a)) for a in node.args) + "})"
+                    case "sum":
+                        state.used_builtins.add(Numeric)
+                        if len(node.args) == 0:
+                            raise SyntaxError("sum requires at least one argument")
+                        iterable = unwrap_paren(__dfs_stmt(node.args[0]))
+                        start = unwrap_paren(__dfs_stmt(node.args[1])) if len(node.args) >= 2 else "0"
+                        return f"std::accumulate({iterable}.begin(), {iterable}.end(), static_cast<decltype({iterable})::value_type>({start}))"
+                    case "sorted":
+                        state.used_builtins.add(Algorithm)
+                        if len(node.args) != 1: raise SyntaxError("sorted requires exactly one argument")
+                        reverse = False
+                        for kwd in node.keywords:
+                            if kwd.arg == "reverse":
+                                if type(kwd.value) == ast.Constant and kwd.value.value is True:
+                                    reverse = True
+                        tpl = Template_Sorted_Reverse if reverse else Template_Sorted
+                        return tpl.format(stmt_state, iterable=unwrap_paren(__dfs_stmt(node.args[0])))
+                    case "reversed":
+                        state.used_builtins.add(Algorithm)
+                        if len(node.args) != 1: raise SyntaxError("reversed requires exactly one argument")
+                        return Template_Reversed.format(stmt_state, iterable=unwrap_paren(__dfs_stmt(node.args[0])))
+                    case "any" | "all":
+                        state.used_builtins.add(Algorithm)
+                        op = "std::any_of" if func.id == "any" else "std::all_of"
+                        if len(node.args) != 1: raise SyntaxError(f"{func.id} requires exactly one argument")
+                        iterable = unwrap_paren(__dfs_stmt(node.args[0]))
+                        tmp = state.get_tempid()
+                        stmt_state.extra_codes_pre.append(f"const auto& {tmp} = {iterable};")
+                        return f"{op}({tmp}.begin(), {tmp}.end(), [](auto __x){{ return static_cast<bool>(__x); }})"
+                    case "round":
+                        state.used_builtins.add(CMath)
+                        if len(node.args) == 1:
+                            return f"static_cast<long>(std::round({unwrap_paren(__dfs_stmt(node.args[0]))}))"
+                        if len(node.args) == 2:
+                            return Template_Round_NDigits.format(stmt_state,
+                                x=unwrap_paren(__dfs_stmt(node.args[0])),
+                                ndigits=unwrap_paren(__dfs_stmt(node.args[1])))
+                        raise SyntaxError("round requires 1 or 2 arguments")
+                    case "chr":
+                        state.used_builtins.add(String)
+                        if len(node.args) != 1: raise SyntaxError("chr requires exactly one argument")
+                        return f"std::string(1, static_cast<char>({unwrap_paren(__dfs_stmt(node.args[0]))}))"
+                    case "ord":
+                        if len(node.args) != 1: raise SyntaxError("ord requires exactly one argument")
+                        return f"static_cast<long>(({unwrap_paren(__dfs_stmt(node.args[0]))})[0])"
+                    case "open":
+                        return __emit_file_open(node)
                     case "c_array":
                         return "{}"
                     case _:
+                        if (func.id in state.imports_from_random
+                            and not isinstance(type_ctx.type_dict.get(func.id), FunctionTypeData)):
+                            return __emit_random_call(state.imports_from_random[func.id], node.args)
+                        if (func.id in state.imports_from_math
+                            and not isinstance(type_ctx.type_dict.get(func.id), FunctionTypeData)):
+                            return __emit_math_call(state.imports_from_math[func.id], node.args)
+                        if (func.id in state.imports_from_time
+                            and not isinstance(type_ctx.type_dict.get(func.id), FunctionTypeData)):
+                            return __emit_time_call(state.imports_from_time[func.id], node.args)
+
                         typ = eval_type(func, type_ctx, state, path).type_
                         if typ.startswith("py2cpp") and typ.endswith("py_object"):
                             args_list = "PyTuple_Pack(" + str(len(node.args))
@@ -671,6 +1169,36 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                         return __dfs_stmt(node.func) + "(" + ", ".join(unwrap_paren(__dfs_stmt(arg)) for arg in node.args) + ")"
 
             if type(func) == ast.Attribute:
+                if (type(func.value) == ast.Name
+                    and func.value.id in state.imports_random_module
+                    and func.attr in ("randint", "randrange", "shuffle")):
+                    return __emit_random_call(func.attr, node.args)
+                if (type(func.value) == ast.Name
+                    and func.value.id in state.imports_math_module
+                    and func.attr in MATH_FUNCS):
+                    return __emit_math_call(func.attr, node.args)
+                if (type(func.value) == ast.Name
+                    and func.value.id in state.imports_time_module
+                    and func.attr in TIME_FUNCS):
+                    return __emit_time_call(func.attr, node.args)
+                if type(func.value) == ast.Name and func.value.id in state.file_vars:
+                    fvar = state.file_vars[func.value.id]
+                    match func.attr:
+                        case "read":
+                            state.used_builtins.add(SStream)
+                            state.used_builtins.add(String)
+                            return Template_FileRead.format(stmt_state, file=fvar)
+                        case "readline":
+                            state.used_builtins.add(String)
+                            return Template_FileReadline.format(stmt_state, file=fvar)
+                        case "write":
+                            if len(node.args) != 1: raise SyntaxError("file.write requires 1 argument")
+                            return f"{fvar} << {unwrap_paren(__dfs_stmt(node.args[0]))}"
+                        case "close":
+                            return f"{fvar}.close()"
+                        case _:
+                            raise NotImplementedError(f"Unsupported file method: {func.attr}")
+
                 target_type = eval_type(func.value, type_ctx, state, path)
 
                 if target_type.type_ == "builtins.str":
@@ -685,8 +1213,109 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                             return Template_String_Upper.format(stmt_state, string=__dfs_stmt(func.value))
                         case "lower":
                             return Template_String_Lower.format(stmt_state, string=__dfs_stmt(func.value))
+                        case "split":
+                            state.used_builtins.add(List)
+                            state.used_builtins.add(String)
+                            if len(node.args) == 0:
+                                state.used_builtins.add(SStream)
+                                return Template_StrSplitWs.format(stmt_state, string=__dfs_stmt(func.value))
+                            return Template_StrSplit.format(stmt_state,
+                                string=__dfs_stmt(func.value),
+                                sep=unwrap_paren(__dfs_stmt(node.args[0])))
+                        case "join":
+                            if len(node.args) != 1: raise SyntaxError("str.join requires 1 argument")
+                            state.used_builtins.add(String)
+                            return Template_StrJoin.format(stmt_state,
+                                sep=__dfs_stmt(func.value),
+                                iterable=unwrap_paren(__dfs_stmt(node.args[0])))
+                        case "replace":
+                            if len(node.args) != 2: raise SyntaxError("str.replace requires 2 arguments")
+                            state.used_builtins.add(String)
+                            return Template_StrReplace.format(stmt_state,
+                                string=__dfs_stmt(func.value),
+                                old=unwrap_paren(__dfs_stmt(node.args[0])),
+                                new_=unwrap_paren(__dfs_stmt(node.args[1])))
+                        case "strip":
+                            state.used_builtins.add(String)
+                            return Template_StrStrip.format(stmt_state, string=__dfs_stmt(func.value))
+                        case "lstrip":
+                            state.used_builtins.add(String)
+                            return Template_StrLStrip.format(stmt_state, string=__dfs_stmt(func.value))
+                        case "rstrip":
+                            state.used_builtins.add(String)
+                            return Template_StrRStrip.format(stmt_state, string=__dfs_stmt(func.value))
+                        case "startswith":
+                            if len(node.args) != 1: raise SyntaxError("str.startswith requires 1 argument")
+                            state.used_builtins.add(String)
+                            s_tmp = state.get_tempid()
+                            p_tmp = state.get_tempid()
+                            stmt_state.extra_codes_pre.append(f"const std::string& {s_tmp} = {__dfs_stmt(func.value)};")
+                            stmt_state.extra_codes_pre.append(f"const std::string& {p_tmp} = {unwrap_paren(__dfs_stmt(node.args[0]))};")
+                            return f"({s_tmp}.size() >= {p_tmp}.size() && {s_tmp}.compare(0, {p_tmp}.size(), {p_tmp}) == 0)"
+                        case "endswith":
+                            if len(node.args) != 1: raise SyntaxError("str.endswith requires 1 argument")
+                            state.used_builtins.add(String)
+                            s_tmp = state.get_tempid()
+                            p_tmp = state.get_tempid()
+                            stmt_state.extra_codes_pre.append(f"const std::string& {s_tmp} = {__dfs_stmt(func.value)};")
+                            stmt_state.extra_codes_pre.append(f"const std::string& {p_tmp} = {unwrap_paren(__dfs_stmt(node.args[0]))};")
+                            return f"({s_tmp}.size() >= {p_tmp}.size() && {s_tmp}.compare({s_tmp}.size() - {p_tmp}.size(), {p_tmp}.size(), {p_tmp}) == 0)"
+                        case "count":
+                            if len(node.args) != 1: raise SyntaxError("str.count requires 1 argument")
+                            return Template_StrCount.format(stmt_state,
+                                string=__dfs_stmt(func.value),
+                                sub=unwrap_paren(__dfs_stmt(node.args[0])))
+                        case "isdigit" | "isalpha" | "isalnum" | "isspace" | "isupper" | "islower":
+                            state.used_builtins.add(Algorithm)
+                            state.used_builtins.add(CCtype)
+                            state.used_builtins.add(String)
+                            check_map = {"isdigit": "::isdigit", "isalpha": "::isalpha", "isalnum": "::isalnum",
+                                         "isspace": "::isspace", "isupper": "::isupper", "islower": "::islower"}
+                            s_tmp = state.get_tempid()
+                            stmt_state.extra_codes_pre.append(f"const std::string& {s_tmp} = {__dfs_stmt(func.value)};")
+                            return f"(!{s_tmp}.empty() && std::all_of({s_tmp}.begin(), {s_tmp}.end(), [](unsigned char __c){{ return {check_map[func.attr]}(__c) != 0; }}))"
                         case _:
                             raise NotImplementedError(f"Unsupported string method: {func.attr}")
+
+                if target_type.type_.startswith("builtins.dict"):
+                    match func.attr:
+                        case "get":
+                            if len(node.args) < 1: raise SyntaxError("dict.get requires at least 1 argument")
+                            tmp = state.get_tempid()
+                            d_str = __dfs_stmt(func.value)
+                            k_str = unwrap_paren(__dfs_stmt(node.args[0]))
+                            default_str = unwrap_paren(__dfs_stmt(node.args[1])) if len(node.args) >= 2 else f"typename std::decay<decltype({d_str})>::type::mapped_type{{}}"
+                            stmt_state.extra_codes_pre.append(f"auto {tmp} = {d_str}.find({k_str});")
+                            return f"({tmp} != {d_str}.end() ? {tmp}->second : {default_str})"
+                        case "keys" | "values" | "items":
+                            raise NotImplementedError(f"dict.{func.attr}() should be used inside a for-loop")
+                        case "pop":
+                            if len(node.args) != 1: raise SyntaxError("dict.pop requires 1 argument")
+                            d_str = __dfs_stmt(func.value)
+                            k_str = unwrap_paren(__dfs_stmt(node.args[0]))
+                            tmp_it = state.get_tempid()
+                            tmp_val = state.get_tempid()
+                            stmt_state.extra_codes_pre.append(f"auto {tmp_it} = {d_str}.find({k_str});")
+                            stmt_state.extra_codes_pre.append(f"auto {tmp_val} = {tmp_it}->second;")
+                            stmt_state.extra_codes_pre.append(f"{d_str}.erase({tmp_it});")
+                            return tmp_val
+                        case "clear":
+                            return f"{__dfs_stmt(func.value)}.clear()"
+                        case _:
+                            raise NotImplementedError(f"Unsupported dict method: {func.attr}")
+
+                if target_type.type_.startswith("builtins.set"):
+                    match func.attr:
+                        case "add":
+                            if len(node.args) != 1: raise SyntaxError("set.add requires 1 argument")
+                            return f"{__dfs_stmt(func.value)}.insert({unwrap_paren(__dfs_stmt(node.args[0]))})"
+                        case "remove" | "discard":
+                            if len(node.args) != 1: raise SyntaxError(f"set.{func.attr} requires 1 argument")
+                            return f"{__dfs_stmt(func.value)}.erase({unwrap_paren(__dfs_stmt(node.args[0]))})"
+                        case "clear":
+                            return f"{__dfs_stmt(func.value)}.clear()"
+                        case _:
+                            raise NotImplementedError(f"Unsupported set method: {func.attr}")
 
                 if target_type.type_ == "builtins.list":
                     match func.attr:
@@ -720,6 +1349,10 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.Name:
             assert type(node) == ast.Name
+            if (node.id in state.imports_from_math
+                and state.imports_from_math[node.id] in MATH_CONSTS
+                and node.id not in state.defined):
+                return __emit_math_const(state.imports_from_math[node.id])
             return node.id
 
         case ast.BinOp:
@@ -779,8 +1412,42 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.Subscript:
             assert type(node) == ast.Subscript
-            if eval_type(node.value, type_ctx, state, path).type_ == "tuple":
+            value_type = eval_type(node.value, type_ctx, state, path)
+            if value_type.type_ == "tuple":
                 return state.get_name("get") + "<" + unwrap_paren(__dfs_stmt(node.slice)) + ">(" + __dfs_stmt(node.value) + ")"
+
+            if type(node.slice) == ast.Slice:
+                if node.slice.step is not None:
+                    raise NotImplementedError("Slicing with step is not supported")
+                tmp = state.get_tempid()
+                target_str = __dfs_stmt(node.value)
+                stmt_state.extra_codes_pre.append(f"const auto& {tmp} = {target_str};")
+
+                def _slice_idx(expr: ast.expr | None, default: str) -> str:
+                    if expr is None:
+                        return default
+                    s = unwrap_paren(__dfs_stmt(expr))
+                    return f"(({s}) < 0 ? static_cast<long>({tmp}.size()) + ({s}) : ({s}))"
+
+                lo = _slice_idx(node.slice.lower, "0")
+                hi = _slice_idx(node.slice.upper, f"static_cast<long>({tmp}.size())")
+
+                if value_type.type_ == "builtins.str":
+                    return f"{tmp}.substr({lo}, ({hi}) - ({lo}))"
+                if value_type.type_.startswith("builtins.list"):
+                    elem_type = value_type.generics[0]
+                    assert type(elem_type) == TypeData
+                    return f"std::vector<{parse_type(elem_type, type_ctx, state)}>({tmp}.begin() + ({lo}), {tmp}.begin() + ({hi}))"
+                raise NotImplementedError(f"Slicing not supported for type: {value_type.type_}")
+
+            if (type(node.slice) == ast.UnaryOp and type(node.slice.op) == ast.USub
+                and type(node.slice.operand) == ast.Constant and type(node.slice.operand.value) == int):
+                tmp = state.get_tempid()
+                target_str = __dfs_stmt(node.value)
+                stmt_state.extra_codes_pre.append(f"const auto& {tmp} = {target_str};")
+                offset = node.slice.operand.value
+                return f"{tmp}[{tmp}.size() - {offset}]"
+
             return __dfs_stmt(node.value) + "[" + unwrap_paren(__dfs_stmt(node.slice)) + "]"
 
         case ast.UnaryOp:
@@ -811,7 +1478,6 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
 
         case ast.Compare:
             assert type(node) == ast.Compare
-            assert len(node.ops) == 1 and len(node.comparators) == 1
             comp_ops: dict[type[ast.cmpop], str] = {
                 ast.Eq: "==",
                 ast.NotEq: "!=",
@@ -820,7 +1486,32 @@ def dfs_stmt(node: ast.expr, type_ctx: TypeContext, stmt_state: StmtState, path:
                 ast.Gt: ">",
                 ast.GtE: ">=",
             }
-            return "(" + __dfs_stmt(node.left) + " " + comp_ops[type(node.ops[0])] + " " + __dfs_stmt(node.comparators[0]) + ")"
+            in_ops = (ast.In, ast.NotIn)
+            if len(node.ops) == 1 and type(node.ops[0]) in in_ops:
+                container_type = eval_type(node.comparators[0], type_ctx, state, path)
+                left_str = unwrap_paren(__dfs_stmt(node.left))
+                right_str = __dfs_stmt(node.comparators[0])
+                negate = type(node.ops[0]) == ast.NotIn
+                if container_type.type_ == "builtins.str":
+                    state.used_builtins.add(String)
+                    c_tmp = state.get_tempid()
+                    stmt_state.extra_codes_pre.append(f"const std::string& {c_tmp} = {right_str};")
+                    expr = f"({c_tmp}.find({left_str}) != std::string::npos)"
+                elif container_type.type_.startswith("builtins.dict") or container_type.type_.startswith("builtins.set"):
+                    expr = f"({right_str}.count({left_str}) > 0)"
+                else:
+                    state.used_builtins.add(Algorithm)
+                    expr = f"(std::find({right_str}.begin(), {right_str}.end(), {left_str}) != {right_str}.end())"
+                return f"(!{expr})" if negate else expr
+            if len(node.ops) == 1:
+                return "(" + __dfs_stmt(node.left) + " " + comp_ops[type(node.ops[0])] + " " + __dfs_stmt(node.comparators[0]) + ")"
+            parts: list[str] = []
+            prev = __dfs_stmt(node.left)
+            for op, comp in zip(node.ops, node.comparators):
+                cur = __dfs_stmt(comp)
+                parts.append(f"({prev} {comp_ops[type(op)]} {cur})")
+                prev = cur
+            return "(" + " && ".join(parts) + ")"
 
         case ast.BoolOp:
             assert type(node) == ast.BoolOp
@@ -1261,14 +1952,36 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
 
         case ast.Import:
             assert type(node) == ast.Import
-            if node.names and node.names[0].name.split(".")[0] in ("sys", "py2cpp"):
-                pass
-            else:
-                raise NotImplementedError("Only sys and py2cpp are supported")
+            for alias in node.names:
+                top_module = alias.name.split(".")[0]
+                if top_module == "random":
+                    state.imports_random_module.add(alias.asname or alias.name)
+                elif top_module == "math":
+                    state.imports_math_module.add(alias.asname or alias.name)
+                elif top_module == "time":
+                    state.imports_time_module.add(alias.asname or alias.name)
+                elif top_module in ("sys", "py2cpp"):
+                    pass
+                else:
+                    raise NotImplementedError("Only sys, py2cpp, random, math, and time are supported")
 
         case ast.ImportFrom:
             assert type(node) == ast.ImportFrom
-            pass
+            if node.module == "random":
+                for alias in node.names:
+                    if alias.name in ("randint", "randrange", "shuffle"):
+                        local_name = alias.asname or alias.name
+                        state.imports_from_random[local_name] = alias.name
+            elif node.module == "math":
+                for alias in node.names:
+                    if alias.name in MATH_FUNCS or alias.name in MATH_CONSTS:
+                        local_name = alias.asname or alias.name
+                        state.imports_from_math[local_name] = alias.name
+            elif node.module == "time":
+                for alias in node.names:
+                    if alias.name in TIME_FUNCS:
+                        local_name = alias.asname or alias.name
+                        state.imports_from_time[local_name] = alias.name
 
         case ast.Continue:
             result += "continue;" + comments_now_code
@@ -1285,7 +1998,7 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
 
             assert len(node.items) == 1, "Only single item 'with' statement is supported"
             ctx_expr = node.items[0].context_expr
-            
+
             if type(ctx_expr) == ast.Call and type(ctx_expr.func) == ast.Name:
                 match ctx_expr.func.id:
                     case "c_global":
@@ -1293,6 +2006,45 @@ def dfs(node: ast.Module | ast.stmt, type_ctx: TypeContext, state: State, depth:
                             state.global_code += dfs(stmt, type_ctx, state, depth, path) + "\n"
                     case "c_skip":
                         pass
+                    case "open":
+                        optvar = node.items[0].optional_vars
+                        assert type(optvar) == ast.Name, "with open(...) requires 'as <name>'"
+                        fname = optvar.id
+
+                        if len(ctx_expr.args) < 1: raise SyntaxError("open requires at least 1 argument")
+                        stmt_state_open = StmtState(state)
+                        path_str = unwrap_paren(dfs_stmt(ctx_expr.args[0], type_ctx, stmt_state_open, path))
+                        mode = "r"
+                        if len(ctx_expr.args) >= 2:
+                            mode_node = ctx_expr.args[1]
+                            if type(mode_node) == ast.Constant and type(mode_node.value) == str:
+                                mode = mode_node.value
+                        for kwd in ctx_expr.keywords:
+                            if kwd.arg == "mode" and type(kwd.value) == ast.Constant and type(kwd.value.value) == str:
+                                mode = kwd.value.value
+                        state.used_builtins.add(FStream)
+                        cls = "std::ofstream" if ("w" in mode or "a" in mode) else "std::ifstream"
+                        flags = ""
+                        if "a" in mode:
+                            flags = ", std::ios::app"
+                        if "b" in mode:
+                            flags += ", std::ios::binary"
+
+                        actual_name = "__py2c_file_" + state.get_tempid()
+                        state.file_vars[fname] = actual_name
+
+                        if stmt_state_open.collect_pre_extra:
+                            result += stmt_state_open.collect_pre_extra + "\n"
+                        result += f"{cls} {actual_name}({path_str}{flags});\n"
+                        for stmt in node.body:
+                            line = dfs(stmt, type_ctx, state, depth, path)
+                            if line != "":
+                                result += line + "\n"
+                        result += f"{actual_name}.close();"
+                        if stmt_state_open.collect_post_extra:
+                            result += "\n" + stmt_state_open.collect_post_extra
+
+                        del state.file_vars[fname]
                     case _:
                         raise NotImplementedError(f"Unsupported 'with' context: {ctx_expr.func.id}")
 
